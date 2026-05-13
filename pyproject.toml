@@ -1,0 +1,63 @@
+[project]
+name = "amadeus"
+version = "0.1.0"
+description = "Amadeus - LPM-inspired real-time interactive AI companion with Live2D avatar"
+requires-python = "==3.11.5"
+license = { text = "MIT" }
+authors = [
+    { name = "Amadeus Team" },
+]
+dependencies = [
+    "PySide6>=6.6.0",
+    "live2d-py>=0.5.0",
+    "numpy>=1.24.0",
+    "PyAudio>=0.2.13",
+    "opencv-python>=4.8.0",
+    "mediapipe>=0.10.0",
+    "whisper-cpp-python>=0.1.0",
+    "torch>=2.0.0",
+    "transformers>=4.36.0",
+    "pyyaml>=6.0",
+    "soundfile>=0.12.0",
+    "loguru>=0.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-qt>=4.2.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "W",   # pycodestyle warnings
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
