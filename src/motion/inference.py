@@ -1,6 +1,6 @@
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import torch
@@ -167,7 +167,6 @@ class DiffusionMotionInference:
                 t_next = timesteps[i + 1]
                 t_tensor = t.unsqueeze(0).expand(B)
                 alpha_t = torch.tensor(self._alphas_cumprod[t], device=self._device)
-                alpha_next = torch.tensor(self._alphas_cumprod[t_next], device=self._device)
                 pred = self._model(user_wav, tts_wav, vis, prompts, id_tensor, t_tensor, params)
                 beta_t = torch.tensor(self._betas[t], device=self._device)
                 if t_next > 0:

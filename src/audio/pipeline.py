@@ -1,12 +1,12 @@
 from collections import deque
+from collections.abc import Callable
 from enum import Enum, auto
-from typing import Callable
 
 import numpy as np
 from loguru import logger
 
-from src.audio.capture import MicrophoneCapture
 from src.audio.asr import WhisperASR
+from src.audio.capture import MicrophoneCapture
 
 
 class PipelineState(Enum):

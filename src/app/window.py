@@ -1,19 +1,24 @@
 from threading import Thread
 
-from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QLabel, QPushButton, QTextEdit,
-)
-from PySide6.QtCore import Qt, Signal, QObject
-from PySide6.QtGui import QFont
 from loguru import logger
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 from src.audio.pipeline import AudioPipeline, PipelineState
-from src.dialogue.model import DialogueModel
 from src.dialogue.context import ConversationContext
+from src.dialogue.model import DialogueModel
 from src.dialogue.persona import Persona
 from src.motion.inference import DiffusionMotionInference
-from src.tts.engine import TTSEngine
 from src.perception.camera import CameraPerception
+from src.tts.engine import TTSEngine
 
 
 class _PipelineBridge(QObject):

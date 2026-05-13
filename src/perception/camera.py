@@ -1,5 +1,5 @@
 import threading
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 from loguru import logger

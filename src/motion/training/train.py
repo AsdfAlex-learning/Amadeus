@@ -64,7 +64,7 @@ def train(
         for batch_idx, (audio, motion) in enumerate(dataloader):
             audio = audio.to(device)
             motion = motion.to(device)
-            B, T = audio.shape[0], motion.shape[1]
+            B, _ = audio.shape[0], motion.shape[1]
             tts_audio = torch.zeros_like(audio)
             visual = torch.zeros(B, 5, 3, 224, 224, device=device)
             identity = torch.zeros(B, dtype=torch.long, device=device)

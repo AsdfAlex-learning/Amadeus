@@ -1,11 +1,9 @@
-from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from loguru import logger
-
 
 # ═══════════════════════════════════════════════════════════════
 # Encoders (frozen feature extractors)
@@ -215,7 +213,7 @@ class DiTBlock(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def _forward(self, x: torch.Tensor, c: torch.Tensor, cross_kv: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _forward(self, x: torch.Tensor, c: torch.Tensor, cross_kv: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         x = x + self.attn(self.attn_norm1(x, c), self.attn_norm1(x, c), self.attn_norm1(x, c), need_weights=False)[0]
         if cross_kv is not None:
             x = x + self.cross_attn(
@@ -224,7 +222,7 @@ class DiTBlock(nn.Module):
         x = x + self.ffn(self.ffn_norm(x, c))
         return x
 
-    def forward(self, x: torch.Tensor, c: torch.Tensor, cross_kv: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, c: torch.Tensor, cross_kv: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         if self.use_checkpoint and self.training:
             return checkpoint.checkpoint(self._forward, x, c, cross_kv, mask, use_reentrant=False)
         return self._forward(x, c, cross_kv, mask)

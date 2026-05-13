@@ -1,5 +1,5 @@
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 
 from loguru import logger
 
@@ -59,12 +59,8 @@ class DialogueModel:
         )
         inputs = self._tokenizer(prompt, return_tensors="pt").to(self._device)
 
-        from transformers import TextStreamer
-
-        streamer = TextStreamer(self._tokenizer, skip_prompt=True, skip_special_tokens=True)
-        from threading import Thread
-
         result_chunks: list[str] = []
+        from threading import Thread
 
         def _run():
             outputs = self._model.generate(
@@ -86,12 +82,11 @@ class DialogueModel:
         thread.join()
 
         full_text = "".join(result_chunks)
-        for word in full_text:
-            yield word
+        yield from full_text
 
     def _generate_api(self, messages: list[dict[str, str]]) -> Generator[str, None, None]:
-        from urllib import request
         import json
+        from urllib import request
 
         api_url = "http://localhost:11434/api/chat"
         payload = json.dumps({

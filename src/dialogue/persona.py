@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Generator
 
 import yaml
 from loguru import logger
@@ -26,7 +25,7 @@ class Persona:
         if persona_file:
             path = Path(persona_file)
             if path.exists():
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     data = yaml.safe_load(f)
                 self._name = data.get("name", self._name)
                 self._system_prompt = data.get("system_prompt", self._system_prompt)
