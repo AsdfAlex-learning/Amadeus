@@ -1,0 +1,98 @@
+# Amadeus Default Configuration
+# ================================
+
+app:
+  name: "Amadeus"
+  version: "0.1.0"
+  window:
+    title: "Amadeus - Interactive Companion"
+    width: 1280
+    height: 720
+    fullscreen: false
+    transparent_background: false
+
+live2d:
+  # Path to Live2D model directory (Cubism 3.0+ / .model3.json)
+  model_dir: "assets/live2d"
+  model_name: null  # Set to model file name, e.g. "kei_vowels_pro_t06"
+  # Default parameter scale for neutral pose
+  default_parameters:
+    ParamMouthOpenY: 0.0
+    ParamEyeLOpen: 1.0
+    ParamEyeROpen: 1.0
+    ParamBrowLY: 0.0
+    ParamBrowRY: 0.0
+    ParamAngleX: 0.0
+    ParamAngleY: 0.0
+    ParamAngleZ: 0.0
+    ParamBodyAngleX: 0.0
+    ParamBodyAngleY: 0.0
+    ParamBodyAngleZ: 0.0
+  # How often to apply parameter updates (seconds)
+  update_interval: 0.016  # ~60fps
+
+audio:
+  # Microphone device index (null = system default)
+  input_device: null
+  sample_rate: 16000
+  channels: 1
+  chunk_size: 1024
+
+asr:
+  # Whisper model size: tiny, base, small, medium, large
+  model_size: "base"
+  language: "zh"  # auto, zh, en
+  # Path to Whisper.cpp model files
+  model_dir: "models/whisper"
+
+dialogue:
+  # Model type: qwen2.5, llama, custom
+  model_type: "qwen2.5"
+  model_path: "models/dialogue"
+  model_size: "3B"
+  quantization: "int8"  # int4, int8, fp16
+  max_context_tokens: 4096
+  # System prompt / character persona
+  persona: |
+    你是 Amadeus，一个温柔、理性、有共情能力的 AI 助手。
+    你善于倾听，能理解对方的情感，并用自然的方式回应。
+    你的回答简洁而富有温度，像一个真正的朋友。
+    你不使用过于正式或学术化的语言。
+
+tts:
+  # Engine: cosyvoice2, chattts, fishspeech
+  engine: "cosyvoice2"
+  model_path: "models/tts"
+  # Voice preset
+  voice: "default"
+  speed: 1.0
+  # Sample rate for output
+  sample_rate: 22050
+
+motion:
+  model_path: "models/motion"
+  model_type: "full_duplex_dit"
+  output_params: 45
+  hidden_dim: 320
+  num_layers: 4
+  num_heads: 8
+  ff_dim: 1280
+  chunk_size: 1.0
+  streaming: true
+  num_inference_steps: 4
+  diffusion_beta_start: 0.0001
+  diffusion_beta_end: 0.02
+  identity_vocab_size: 16
+  use_fp16: true
+
+perception:
+  camera_device: null
+  enable_face_detection: true
+  enable_gaze_estimation: true
+  enable_expression_recognition: true
+
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "{time:YYYY-MM-DD HH:mm:ss} | {level} | {name}:{function}:{line} | {message}"
+  rotation: "10 MB"
+  retention: "7 days"
