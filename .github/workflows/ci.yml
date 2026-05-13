@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install lint tools
+        run: pip install ruff
+
+      - name: Ruff lint
+        run: ruff check src/
+
+      - name: Ruff format check
+        run: ruff format --check src/
+
+      - name: AST syntax check
+        run: |
+          python -c "
+          import ast
+          from pathlib import Path
+          src = Path('src')
+          errors = []
+          for f in sorted(src.rglob('*.py')):
+              if f.stat().st_size < 5:
+                  continue
+              try:
+                  ast.parse(f.read_text())
+              except SyntaxError as e:
+                  errors.append(f'{f}: {e}')
+          if errors:
+              for e in errors:
+                  print(e)
+              exit(1)
+          print('All files pass syntax check')
+          "
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y portaudio19-dev
+
+      - name: Install Python deps
+        run: pip install -r requirements-lock.txt basedpyright
+
+      - name: basedpyright type check
+        run: basedpyright src/
+
+      - name: Import verification
+        run: |
+          python -c "
+          from src.config import load_config
+          from src.dialogue.context import ConversationContext
+          from src.dialogue.persona import Persona
+          from src.tts.engine import TTSEngine
+          from src.audio.capture import MicrophoneCapture
+          config = load_config()
+          print('Core imports: OK')
+          mic = MicrophoneCapture(config)
+          print(f'Audio devices: {len(mic.get_audio_devices())}')
+          mic.cleanup()
+          print('Import verification: PASS')
+          "
