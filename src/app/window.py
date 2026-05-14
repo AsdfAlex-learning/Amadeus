@@ -43,6 +43,7 @@ class AmadeusWindow(QMainWindow):
         )
         self._bridge = _PipelineBridge()
         self._generating = False
+        self._pyaudio = None
         self._setup_window()
         self._setup_ui()
         self._connect_pipeline()
@@ -191,8 +192,9 @@ class AmadeusWindow(QMainWindow):
                 return
             self.motion_model.process_tts_audio(audio_data)
             import pyaudio
-            p = pyaudio.PyAudio()
-            stream = p.open(
+            if self._pyaudio is None:
+                self._pyaudio = pyaudio.PyAudio()
+            stream = self._pyaudio.open(
                 format=pyaudio.paFloat32,
                 channels=1,
                 rate=self.tts_engine.sample_rate,
@@ -201,7 +203,6 @@ class AmadeusWindow(QMainWindow):
             stream.write(audio_data.tobytes())
             stream.stop_stream()
             stream.close()
-            p.terminate()
         except Exception as e:
             logger.error(f"TTS playback error: {e}")
 
@@ -243,4 +244,6 @@ class AmadeusWindow(QMainWindow):
         self.audio_pipeline.cleanup()
         self.motion_model.cleanup()
         self.live2d_widget.cleanup()
+        if self._pyaudio is not None:
+            self._pyaudio.terminate()
         super().closeEvent(event)

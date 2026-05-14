@@ -46,7 +46,7 @@ class Live2DRenderer:
             self._live2d.init()
             self._live2d.LoadModel(str(model_path))
             self._model_loaded = True
-            self._init_params_from_model()
+            self._init_default_params()
             logger.info(f"Live2D model loaded: {model_path}")
             return True
         except ImportError:
@@ -60,20 +60,14 @@ class Live2DRenderer:
             self._init_default_params()
             return False
 
-    def _init_params_from_model(self):
-        defaults = self.config["live2d"]["default_parameters"]
-        for name, value in defaults.items():
-            self._params[name] = float(value)
-            self._param_range[name] = (0.0, 1.0)
-
     def set_parameter(self, name: str, value: float):
         clamped = max(0.0, min(1.0, float(value)))
         self._params[name] = clamped
         if self._model_loaded:
             try:
                 self._live2d.SetParameterValue(name, clamped)
-            except Exception as e:
-                logger.debug(f"Failed to set parameter {name}: {e}")
+            except Exception:
+                pass
 
     def set_parameters(self, values: dict[str, float]):
         for name, value in values.items():
