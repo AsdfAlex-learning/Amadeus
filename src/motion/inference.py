@@ -130,7 +130,7 @@ class DiffusionMotionInference:
     def _prepare_visual_frames(self, audio_samples: int) -> np.ndarray:
         num_visual = min(len(self._visual_buffer), 5)
         if num_visual == 0:
-            return np.zeros((self._model.output_head[0].in_channels, 224, 224) if False else (1, 3, 224, 224), dtype=np.float32)
+            return np.zeros((1, 3, 224, 224), dtype=np.float32)
         if num_visual < 5:
             frames = []
             for i in range(5):

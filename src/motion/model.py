@@ -1,7 +1,6 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from loguru import logger
 
@@ -179,7 +178,7 @@ class TimestepEmbedding(nn.Module):
         args = t.float().unsqueeze(-1) * freqs.unsqueeze(0)
         emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if emb.shape[-1] < self.dim:
-            emb = F.pad(emb, (0, self.dim - emb.shape[-1]))
+            emb = torch.nn.functional.pad(emb, (0, self.dim - emb.shape[-1]))
         return self.mlp(emb)
 
 
@@ -267,6 +266,7 @@ class FullDuplexDiT(nn.Module):
 
         # ── Modality projections ──
         self.audio_proj = nn.Linear(768, hidden_dim)
+        self.cross_proj = nn.Linear(hidden_dim * 2, hidden_dim)
         self.mode_embedding = nn.Embedding(2, hidden_dim)
 
         # ── Timestep embedding ──
@@ -315,7 +315,7 @@ class FullDuplexDiT(nn.Module):
         self.audio_encoder.to_half()
         self.visual_encoder.to_half()
         self.text_encoder.to_half()
-        for module in [self.audio_proj, self.mode_embedding, self.time_embed,
+        for module in [self.audio_proj, self.cross_proj, self.mode_embedding, self.time_embed,
                        self.identity_embedding, self.output_head]:
             module.half()
         for block in self.dit_blocks:
@@ -358,6 +358,7 @@ class FullDuplexDiT(nn.Module):
             x = x + (listen_emb if is_listen else speak_emb)
             audio_feat = listen_feat if is_listen else speak_feat
             cross_kv = torch.cat([audio_feat, visual_feat if is_listen else text_feat], dim=-1)
+            cross_kv = self.cross_proj(cross_kv)
             x = block(x, c, cross_kv)
 
         # ── Decode to parameters ──
