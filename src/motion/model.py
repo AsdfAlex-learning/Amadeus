@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
@@ -21,6 +20,7 @@ class HubertEncoder(nn.Module):
     def _try_load(self):
         try:
             from transformers import HubertModel
+
             # Try local cache first (no network)
             try:
                 self.hubert = HubertModel.from_pretrained(self.model_name, local_files_only=True)
@@ -56,7 +56,9 @@ class HubertEncoder(nn.Module):
 
 
 class VisualEncoder(nn.Module):
-    def __init__(self, model_name: str = "mobilenet_v3_small", freeze: bool = True, output_dim: int = 512):
+    def __init__(
+        self, model_name: str = "mobilenet_v3_small", freeze: bool = True, output_dim: int = 512
+    ):
         super().__init__()
         self.model_name = model_name
         self._freeze = freeze
@@ -69,6 +71,7 @@ class VisualEncoder(nn.Module):
     def _try_load(self):
         try:
             from torchvision.models import mobilenet_v3_small
+
             backbone = mobilenet_v3_small(weights=None)
             try:
                 backbone = mobilenet_v3_small(weights="DEFAULT")
@@ -109,7 +112,12 @@ class VisualEncoder(nn.Module):
 
 
 class TextEncoder(nn.Module):
-    def __init__(self, model_name: str = "google/bert_uncased_L-2_H-128_A-2", freeze: bool = True, output_dim: int = 512):
+    def __init__(
+        self,
+        model_name: str = "google/bert_uncased_L-2_H-128_A-2",
+        freeze: bool = True,
+        output_dim: int = 512,
+    ):
         super().__init__()
         self.model_name = model_name
         self._freeze = freeze
@@ -123,8 +131,11 @@ class TextEncoder(nn.Module):
     def _try_load(self):
         try:
             from transformers import BertModel, BertTokenizer
+
             try:
-                self.tokenizer = BertTokenizer.from_pretrained(self.model_name, local_files_only=True)
+                self.tokenizer = BertTokenizer.from_pretrained(
+                    self.model_name, local_files_only=True
+                )
                 self.bert = BertModel.from_pretrained(self.model_name, local_files_only=True)
             except Exception:
                 logger.info(f"BERT not cached, downloading {self.model_name}...")
@@ -152,7 +163,9 @@ class TextEncoder(nn.Module):
             dummy = torch.zeros(len(texts), self.proj.in_features, device=device)
             return self.proj(dummy.to(dummy.dtype))
         with torch.set_grad_enabled(not self._freeze):
-            tokens = self.tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=64).to(device)
+            tokens = self.tokenizer(
+                texts, return_tensors="pt", padding=True, truncation=True, max_length=64
+            ).to(device)
             out = self.bert(**tokens).pooler_output
             return self.proj(out)
 
@@ -174,7 +187,10 @@ class TimestepEmbedding(nn.Module):
 
     def forward(self, t: torch.Tensor) -> torch.Tensor:
         half = self.dim // 2
-        freqs = torch.exp(-torch.arange(half, dtype=torch.float32, device=t.device) * (torch.log(torch.tensor(10000.0)) / (half - 1)))
+        freqs = torch.exp(
+            -torch.arange(half, dtype=torch.float32, device=t.device)
+            * (torch.log(torch.tensor(10000.0)) / (half - 1))
+        )
         args = t.float().unsqueeze(-1) * freqs.unsqueeze(0)
         emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if emb.shape[-1] < self.dim:
@@ -196,7 +212,14 @@ class AdaLN(nn.Module):
 
 
 class DiTBlock(nn.Module):
-    def __init__(self, dim: int, num_heads: int, ff_dim: int, dropout: float = 0.1, use_checkpoint: bool = False):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        ff_dim: int,
+        dropout: float = 0.1,
+        use_checkpoint: bool = False,
+    ):
         super().__init__()
         self.use_checkpoint = use_checkpoint
         self.attn_norm1 = AdaLN(dim, dim)
@@ -212,16 +235,37 @@ class DiTBlock(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def _forward(self, x: torch.Tensor, c: torch.Tensor, cross_kv: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
-        x = x + self.attn(self.attn_norm1(x, c), self.attn_norm1(x, c), self.attn_norm1(x, c), need_weights=False)[0]
-        if cross_kv is not None:
-            x = x + self.cross_attn(
-                self.attn_norm2(x, c), cross_kv, cross_kv, need_weights=False
+    def _forward(
+        self,
+        x: torch.Tensor,
+        c: torch.Tensor,
+        cross_kv: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        x = (
+            x
+            + self.attn(
+                self.attn_norm1(x, c),
+                self.attn_norm1(x, c),
+                self.attn_norm1(x, c),
+                need_weights=False,
             )[0]
+        )
+        if cross_kv is not None:
+            x = (
+                x
+                + self.cross_attn(self.attn_norm2(x, c), cross_kv, cross_kv, need_weights=False)[0]
+            )
         x = x + self.ffn(self.ffn_norm(x, c))
         return x
 
-    def forward(self, x: torch.Tensor, c: torch.Tensor, cross_kv: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        c: torch.Tensor,
+        cross_kv: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if self.use_checkpoint and self.training:
             return checkpoint.checkpoint(self._forward, x, c, cross_kv, mask, use_reentrant=False)
         return self._forward(x, c, cross_kv, mask)
@@ -256,10 +300,14 @@ class FullDuplexDiT(nn.Module):
         self.audio_encoder = HubertEncoder(model_name=audio_encoder_name, freeze=freeze_encoders)
 
         # ── Visual encoder (user's face) ──
-        self.visual_encoder = VisualEncoder(model_name=visual_encoder_name, freeze=freeze_encoders, output_dim=hidden_dim)
+        self.visual_encoder = VisualEncoder(
+            model_name=visual_encoder_name, freeze=freeze_encoders, output_dim=hidden_dim
+        )
 
         # ── Text encoder (motion control prompts) ──
-        self.text_encoder = TextEncoder(model_name=text_encoder_name, freeze=freeze_encoders, output_dim=hidden_dim)
+        self.text_encoder = TextEncoder(
+            model_name=text_encoder_name, freeze=freeze_encoders, output_dim=hidden_dim
+        )
 
         # ── Identity embedding ──
         self.identity_embedding = nn.Embedding(identity_vocab_size, hidden_dim)
@@ -273,16 +321,18 @@ class FullDuplexDiT(nn.Module):
         self.time_embed = TimestepEmbedding(hidden_dim)
 
         # ── DiT blocks (interleaved listen/speak) ──
-        self.dit_blocks = nn.ModuleList([
-            DiTBlock(
-                dim=hidden_dim,
-                num_heads=num_heads,
-                ff_dim=ff_dim,
-                dropout=dropout,
-                use_checkpoint=use_gradient_checkpointing,
-            )
-            for _ in range(num_layers)
-        ])
+        self.dit_blocks = nn.ModuleList(
+            [
+                DiTBlock(
+                    dim=hidden_dim,
+                    num_heads=num_heads,
+                    ff_dim=ff_dim,
+                    dropout=dropout,
+                    use_checkpoint=use_gradient_checkpointing,
+                )
+                for _ in range(num_layers)
+            ]
+        )
 
         # ── Output head ──
         self.output_head = nn.Sequential(
@@ -315,8 +365,14 @@ class FullDuplexDiT(nn.Module):
         self.audio_encoder.to_half()
         self.visual_encoder.to_half()
         self.text_encoder.to_half()
-        for module in [self.audio_proj, self.cross_proj, self.mode_embedding, self.time_embed,
-                       self.identity_embedding, self.output_head]:
+        for module in [
+            self.audio_proj,
+            self.cross_proj,
+            self.mode_embedding,
+            self.time_embed,
+            self.identity_embedding,
+            self.output_head,
+        ]:
             module.half()
         for block in self.dit_blocks:
             block.half()
@@ -354,7 +410,7 @@ class FullDuplexDiT(nn.Module):
         speak_emb = self.mode_embedding(torch.tensor([1], device=device)).expand(B, T, -1)
 
         for i, block in enumerate(self.dit_blocks):
-            is_listen = (i % 2 == 0)
+            is_listen = i % 2 == 0
             x = x + (listen_emb if is_listen else speak_emb)
             audio_feat = listen_feat if is_listen else speak_feat
             cross_kv = torch.cat([audio_feat, visual_feat if is_listen else text_feat], dim=-1)

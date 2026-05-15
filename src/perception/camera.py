@@ -24,6 +24,7 @@ class CameraPerception:
             return
         try:
             import cv2
+
             self._cap = cv2.VideoCapture(self.device_index if self.device_index is not None else 0)
             if not self._cap.isOpened():
                 logger.error("Could not open camera")
@@ -56,6 +57,7 @@ class CameraPerception:
     def _load_mediapipe(self):
         try:
             import mediapipe as mp
+
             self._face_mesh = mp.solutions.face_mesh.FaceMesh(
                 static_image_mode=False,
                 max_num_faces=1,
@@ -69,6 +71,7 @@ class CameraPerception:
 
     def _capture_loop(self):
         import cv2
+
         while self._running and self._cap is not None:
             ret, frame = self._cap.read()
             if not ret:

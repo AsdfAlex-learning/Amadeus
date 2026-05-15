@@ -50,9 +50,7 @@ class Live2DRenderer:
             logger.info(f"Live2D model loaded: {model_path}")
             return True
         except ImportError:
-            logger.error(
-                "live2d-py not installed. Run: pip install live2d-py"
-            )
+            logger.error("live2d-py not installed. Run: pip install live2d-py")
             self._init_default_params()
             return False
         except Exception as e:

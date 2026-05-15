@@ -70,6 +70,7 @@ class AmadeusWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
 
         from src.app.live2d_widget import Live2DWidget
+
         self.live2d_widget = Live2DWidget(self.config)
         layout.addWidget(self.live2d_widget, stretch=3)
 
@@ -139,9 +140,7 @@ class AmadeusWindow(QMainWindow):
         self._bridge.state_changed.emit(state.value)
 
     def _handle_text(self, text: str):
-        self.conversation_display.append(
-            f"<span style='color:#4a90d9'><b>你:</b> {text}</span>"
-        )
+        self.conversation_display.append(f"<span style='color:#4a90d9'><b>你:</b> {text}</span>")
         self.context.add_user_message(text)
         self.motion_model.set_text_prompt(text)
         self._start_generation()
@@ -192,6 +191,7 @@ class AmadeusWindow(QMainWindow):
                 return
             self.motion_model.process_tts_audio(audio_data)
             import pyaudio
+
             if self._pyaudio is None:
                 self._pyaudio = pyaudio.PyAudio()
             stream = self._pyaudio.open(

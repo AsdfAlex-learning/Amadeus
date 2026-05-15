@@ -41,8 +41,7 @@ class WhisperASR:
 
     def _download_model(self):
         model_url = (
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
-            f"ggml-{self.model_size}.bin"
+            f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{self.model_size}.bin"
         )
         model_path = self.model_dir / f"ggml-{self.model_size}.bin"
         import urllib.request

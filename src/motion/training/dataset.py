@@ -61,9 +61,11 @@ class MotionDataset(Dataset):
     def _load_audio(self, path: Path) -> np.ndarray:
         try:
             import soundfile as sf
+
             audio, sr = sf.read(str(path))
             if sr != self.sample_rate:
                 import librosa
+
                 audio = librosa.resample(audio, orig_sr=sr, target_sr=self.sample_rate)
             if audio.ndim > 1:
                 audio = audio.mean(axis=1)

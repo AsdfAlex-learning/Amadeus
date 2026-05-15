@@ -48,9 +48,7 @@ class DiffusionMotionInference:
 
     def load_model(self) -> bool:
         try:
-            self._device = torch.device(
-                "mps" if torch.backends.mps.is_available() else "cpu"
-            )
+            self._device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
             self._model = FullDuplexDiT(
                 num_params=self.num_params,
                 hidden_dim=320,
@@ -119,7 +117,10 @@ class DiffusionMotionInference:
 
             if self._overlap > 0:
                 keep_n = int(self._overlap * self.sample_rate)
-                keep = [self._audio_buffer.popleft() for _ in range(min(keep_n, len(self._audio_buffer)))]
+                keep = [
+                    self._audio_buffer.popleft()
+                    for _ in range(min(keep_n, len(self._audio_buffer)))
+                ]
                 self._audio_buffer.extendleft(reversed(keep))
 
             params = self._diffusion_infer(user_chunk, tts_chunk, visual_frames)
@@ -161,7 +162,9 @@ class DiffusionMotionInference:
             B, T = 1, 49
             params = torch.randn(B, T, self.num_params, device=self._device)
 
-            timesteps = torch.linspace(999, 0, self.num_inference_steps + 1, device=self._device).long()
+            timesteps = torch.linspace(
+                999, 0, self.num_inference_steps + 1, device=self._device
+            ).long()
             for i in range(self.num_inference_steps):
                 t = timesteps[i]
                 t_next = timesteps[i + 1]
@@ -172,12 +175,13 @@ class DiffusionMotionInference:
                 if t_next > 0:
                     noise = torch.randn_like(params)
                     sigma_t = torch.sqrt(beta_t)
-                    params = (
-                        (params - (beta_t / torch.sqrt(1 - alpha_t)) * pred) / torch.sqrt(1 - beta_t)
-                        + sigma_t * noise
-                    )
+                    params = (params - (beta_t / torch.sqrt(1 - alpha_t)) * pred) / torch.sqrt(
+                        1 - beta_t
+                    ) + sigma_t * noise
                 else:
-                    params = (params - (beta_t / torch.sqrt(1 - alpha_t)) * pred) / torch.sqrt(1 - beta_t)
+                    params = (params - (beta_t / torch.sqrt(1 - alpha_t)) * pred) / torch.sqrt(
+                        1 - beta_t
+                    )
 
             return params[0].cpu().numpy()
 

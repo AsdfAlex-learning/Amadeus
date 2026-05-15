@@ -39,8 +39,7 @@ class MicrophoneCapture:
         )
         self._stream.start_stream()
         logger.info(
-            f"Microphone started: {self.sample_rate}Hz, "
-            f"{self.channels}ch, chunk={self.chunk_size}"
+            f"Microphone started: {self.sample_rate}Hz, {self.channels}ch, chunk={self.chunk_size}"
         )
 
     def stop(self):
@@ -83,12 +82,14 @@ class MicrophoneCapture:
         for i in range(self._audio.get_device_count()):
             info = self._audio.get_device_info_by_index(i)
             if info.get("maxInputChannels", 0) > 0:
-                devices.append({
-                    "index": i,
-                    "name": info["name"],
-                    "channels": info["maxInputChannels"],
-                    "sample_rate": int(info["defaultSampleRate"]),
-                })
+                devices.append(
+                    {
+                        "index": i,
+                        "name": info["name"],
+                        "channels": info["maxInputChannels"],
+                        "sample_rate": int(info["defaultSampleRate"]),
+                    }
+                )
         return devices
 
     @property

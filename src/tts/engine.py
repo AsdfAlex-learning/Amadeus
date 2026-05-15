@@ -41,6 +41,7 @@ class TTSEngine:
     def _load_cosyvoice2(self) -> bool:
         try:
             from cosyvoice.cli.cosyvoice import CosyVoice2
+
             self._model = CosyVoice2(str(self.model_path))
             logger.info("CosyVoice2 loaded")
             return True
@@ -54,11 +55,14 @@ class TTSEngine:
     def _load_chattts(self) -> bool:
         try:
             import ChatTTS
+
             chat = ChatTTS.Chat()
             chat.load(source="local" if self.model_path.exists() else "huggingface")
+
             def _synthesize(text: str) -> np.ndarray:
                 wavs = chat.infer([text], use_decoder=True)
                 return wavs[0].squeeze()
+
             self._model = _synthesize
             logger.info("ChatTTS loaded")
             return True
@@ -69,9 +73,12 @@ class TTSEngine:
     def _load_fishspeech(self) -> bool:
         try:
             from fish_speech.inference_engine import TTSInferenceEngine
+
             engine = TTSInferenceEngine(checkpoint_dir=str(self.model_path))
+
             def _synthesize(text: str) -> np.ndarray:
                 return engine.inference(text)
+
             self._model = _synthesize
             logger.info("Fish-Speech loaded")
             return True
@@ -82,21 +89,26 @@ class TTSEngine:
     def _load_pyttsx3(self) -> bool:
         try:
             import pyttsx3
+
             engine = pyttsx3.init()
             voices = engine.getProperty("voices")
             if voices:
                 engine.setProperty("voice", voices[0].id)
             engine.setProperty("rate", int(150 * self.speed))
+
             def _synthesize(text: str) -> np.ndarray:
                 import tempfile
+
                 with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                     tmp_path = f.name
                 engine.save_to_file(text, tmp_path)
                 engine.runAndWait()
                 import soundfile as sf
+
                 audio, _ = sf.read(tmp_path)
                 Path(tmp_path).unlink()
                 return audio.astype(np.float32)
+
             self._model = _synthesize
             logger.info("pyttsx3 loaded as TTS fallback")
             return True

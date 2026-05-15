@@ -72,7 +72,9 @@ def train(
 
             t = torch.randint(0, num_diffusion_steps, (B,), device=device)
             noise = torch.randn_like(motion)
-            noisy = motion + noise * (1.0 - 1e-4) * (t.float() / num_diffusion_steps).unsqueeze(-1).unsqueeze(-1)
+            noisy = motion + noise * (1.0 - 1e-4) * (t.float() / num_diffusion_steps).unsqueeze(
+                -1
+            ).unsqueeze(-1)
 
             with torch.amp.autocast(device_type=device, enabled=scaler is not None):
                 pred = model(audio, tts_audio, visual, prompts, identity, t, noisy)
@@ -99,7 +101,9 @@ def train(
         scheduler.step()
         avg_loss = total_loss / max(len(dataloader), 1)
         if (epoch + 1) % 10 == 0:
-            logger.info(f"Epoch {epoch+1}/{num_epochs} | Loss: {avg_loss:.6f} | LR: {scheduler.get_last_lr()[0]:.2e}")
+            logger.info(
+                f"Epoch {epoch + 1}/{num_epochs} | Loss: {avg_loss:.6f} | LR: {scheduler.get_last_lr()[0]:.2e}"
+            )
 
     checkpoint_path = output_dir / "full_duplex_dit.pt"
     torch.save(model.state_dict(), checkpoint_path)
@@ -108,6 +112,7 @@ def train(
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="Train Full-Duplex DiT")
     parser.add_argument("--data_dir", type=str, required=True)
     parser.add_argument("--output_dir", type=str, default="models/motion")

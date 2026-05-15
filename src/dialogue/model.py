@@ -33,9 +33,7 @@ class DialogueModel:
             elif self.quantization == "int4":
                 load_kwargs["load_in_4bit"] = True
 
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                model_id, trust_remote_code=True
-            )
+            self._tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
             self._model = AutoModelForCausalLM.from_pretrained(
                 model_id, trust_remote_code=True, **load_kwargs
             )
@@ -73,7 +71,7 @@ class DialogueModel:
                 pad_token_id=self._tokenizer.eos_token_id,
             )
             response = self._tokenizer.decode(
-                outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True
+                outputs[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
             )
             result_chunks.append(response)
 
@@ -89,11 +87,13 @@ class DialogueModel:
         from urllib import request
 
         api_url = "http://localhost:11434/api/chat"
-        payload = json.dumps({
-            "model": f"qwen2.5:{self.model_size.lower()}",
-            "messages": messages,
-            "stream": True,
-        }).encode("utf-8")
+        payload = json.dumps(
+            {
+                "model": f"qwen2.5:{self.model_size.lower()}",
+                "messages": messages,
+                "stream": True,
+            }
+        ).encode("utf-8")
 
         req = request.Request(api_url, data=payload)
         req.add_header("Content-Type", "application/json")

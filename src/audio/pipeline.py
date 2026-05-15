@@ -33,9 +33,7 @@ class AudioPipeline:
         self._audio_buffer: list[np.ndarray] = []
         self._pre_speech_buffer: deque[np.ndarray] = deque(
             maxlen=int(
-                self.PRE_SPEECH_BUFFER_SEC
-                * self.capture.sample_rate
-                / self.capture.chunk_size
+                self.PRE_SPEECH_BUFFER_SEC * self.capture.sample_rate / self.capture.chunk_size
             )
         )
         self._silence_counter = 0
