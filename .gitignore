@@ -5,6 +5,7 @@ __pycache__/
 
 # Project management
 .sisyphus/
+DEMO_MISSING.md
 
 # C extensions
 *.so
