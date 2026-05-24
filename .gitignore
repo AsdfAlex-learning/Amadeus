@@ -5,6 +5,7 @@ __pycache__/
 
 # Project management
 .sisyphus/
+.handoff/
 DEMO_MISSING.md
 
 # C extensions
