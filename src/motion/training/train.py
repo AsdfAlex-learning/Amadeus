@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -7,6 +8,7 @@ from torch.utils.data import DataLoader
 
 from src.motion.model import FullDuplexDiT
 from src.motion.training.dataset import MotionDataset
+from src.motion.training.lora import apply_lora, save_lora
 
 
 def train(
@@ -25,6 +27,12 @@ def train(
     dataset_type: str = "preprocessed",
     val_split: float = 0.1,
     resume_from: str | None = None,
+    # ── LoRA ──
+    use_lora: bool = False,
+    lora_rank: int = 8,
+    lora_alpha: float = 16.0,
+    lora_dropout: float = 0.0,
+    lora_target_modules: list[str] | None = None,
 ):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -77,11 +85,35 @@ def train(
         else:
             logger.warning(f"Resume checkpoint not found: {resume_path}")
 
+    # ── LoRA application ──
+    if use_lora:
+        lora_config: dict[str, Any] = {
+            "lora_rank": lora_rank,
+            "lora_alpha": lora_alpha,
+            "lora_dropout": lora_dropout,
+        }
+        if lora_target_modules:
+            lora_config["target_modules"] = lora_target_modules
+        lora_info = apply_lora(model, lora_config)
+        logger.info(
+            f"LoRA: {lora_info['replaced_count']} modules, "
+            f"{lora_info['trainable_params']:,} trainable / {lora_info['total_params']:,} total "
+            f"({100 * lora_info['trainable_params'] / max(lora_info['total_params'], 1):.2f}%)"
+        )
+        # Save LoRA config alongside checkpoints for reproducibility
+        (output_dir / "lora_config.pt").parent.mkdir(parents=True, exist_ok=True)
+        torch.save(lora_config, output_dir / "lora_config.pt")
+
     trainable = model.get_trainable_param_count()
     total = model.get_total_param_count()
     logger.info(f"Model: {trainable:,} trainable / {total:,} total parameters")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    # Optimizer: only train LoRA params when LoRA is active
+    if use_lora:
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+    else:
+        trainable_params = model.parameters()
+    optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
     criterion = nn.MSELoss()
     scaler = torch.amp.GradScaler(device) if use_amp and device == "cuda" else None
@@ -165,15 +197,26 @@ def train(
             log_msg += f" | Val: {val_loss:.6f}"
         logger.info(log_msg)
 
-        # Save checkpoint every 10 epochs
+        # Save checkpoint every N epochs
         if (epoch + 1) % 10 == 0:
-            checkpoint_path = output_dir / f"full_duplex_dit_epoch_{epoch + 1:04d}.pt"
-            torch.save(model.state_dict(), checkpoint_path)
-            logger.info(f"Checkpoint saved: {checkpoint_path}")
+            if use_lora:
+                lora_ckpt_path = output_dir / f"lora_adapter_epoch_{epoch + 1:04d}.pt"
+                save_lora(model, lora_ckpt_path)
+                logger.info(f"LoRA checkpoint saved: {lora_ckpt_path}")
+            else:
+                checkpoint_path = output_dir / f"full_duplex_dit_epoch_{epoch + 1:04d}.pt"
+                torch.save(model.state_dict(), checkpoint_path)
+                logger.info(f"Checkpoint saved: {checkpoint_path}")
 
-    checkpoint_path = output_dir / "full_duplex_dit.pt"
-    torch.save(model.state_dict(), checkpoint_path)
-    logger.info(f"Model saved to {checkpoint_path}")
+    # Final save
+    if use_lora:
+        final_lora_path = output_dir / "lora_adapter.pt"
+        save_lora(model, final_lora_path)
+        logger.info(f"LoRA adapter saved to {final_lora_path}")
+    else:
+        checkpoint_path = output_dir / "full_duplex_dit.pt"
+        torch.save(model.state_dict(), checkpoint_path)
+        logger.info(f"Model saved to {checkpoint_path}")
     return model
 
 
@@ -199,6 +242,16 @@ if __name__ == "__main__":
                         help="Validation split ratio (0=no validation)")
     parser.add_argument("--resume", type=str, default=None,
                         help="Resume from checkpoint path")
+    parser.add_argument("--use_lora", action="store_true",
+                        help="Enable LoRA fine-tuning (freezes base model)")
+    parser.add_argument("--lora_rank", type=int, default=8,
+                        help="LoRA decomposition rank (default: 8)")
+    parser.add_argument("--lora_alpha", type=float, default=16.0,
+                        help="LoRA scaling factor (default: 16.0)")
+    parser.add_argument("--lora_dropout", type=float, default=0.0,
+                        help="LoRA dropout rate (default: 0.0)")
+    parser.add_argument("--lora_target_modules", type=str, nargs="*", default=None,
+                        help="Module name patterns for LoRA (e.g. dit_blocks output_head)")
     args = parser.parse_args()
 
     train(
@@ -216,4 +269,9 @@ if __name__ == "__main__":
         dataset_type=args.dataset_type,
         val_split=args.val_split,
         resume_from=args.resume,
+        use_lora=args.use_lora,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        lora_target_modules=args.lora_target_modules,
     )
