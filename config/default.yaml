@@ -4,6 +4,7 @@
 app:
   name: "Amadeus"
   version: "0.1.0"
+  device: "auto"  # auto / cuda / mps / cpu — override auto-detection
   window:
     title: "Amadeus - Interactive Companion"
     width: 1280
@@ -90,6 +91,63 @@ perception:
   enable_face_detection: true
   enable_gaze_estimation: true
   enable_expression_recognition: true
+
+# Training configuration
+training:
+  num_epochs: 100
+  batch_size: 1
+  grad_accum_steps: 4
+  learning_rate: 0.0001
+  optimizer: "adamw"
+  scheduler: "cosine"
+  weight_decay: 0.01
+  warmup_steps: 100
+  num_diffusion_steps: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  val_split: 0.1
+  checkpoint_interval: 10  # save every N epochs
+  dataset_type: "preprocessed"  # preprocessed, mead, biwi, vocaset
+  use_amp: true
+
+  # LoRA fine-tuning settings (applied when training.lora is enabled)
+  lora:
+    rank: 8
+    alpha: 16
+    dropout: 0.0
+    target_modules:  # empty = all Linear/Conv1d in DiT blocks + output_head
+      - "dit_blocks"
+      - "output_head"
+    merge_on_save: true
+
+# Preprocessing pipeline configuration
+preprocess:
+  video:
+    fps: 30
+    audio_sample_rate: 16000
+    audio_format: "wav"
+  face_landmarker:
+    model_path: null  # auto-download from Google Storage
+    num_blendshapes: 52
+    num_face_landmarks: 478
+    min_detection_confidence: 0.5
+    min_tracking_confidence: 0.5
+  arkit_mapping:
+    config_path: "src/motion/preprocess/mappings/default.yaml"
+    num_live2d_params: 45
+  pipeline:
+    output_format: "npz"  # npz or hdf5
+    save_metadata: true
+    chunk_duration: 1.0  # seconds per training chunk
+
+# Performance parameters (per-persona runtime post-processing)
+performance:
+  gesture_scale: 0.5    # Overall movement amplitude (0.0–1.0)
+  react_speed: 0.5      # Reaction speed / temporal smoothing (0.0–1.0)
+  expressiveness: 0.5    # Facial expression exaggeration (0.0–1.0)
+  mouth_open_max: 0.5    # Maximum mouth openness cap (0.0–1.0)
+  head_motion_range: 0.5 # Head/body angle range (0.0–1.0)
+  idle_energy: 0.5       # Energy level during silence mode (0.0–1.0)
 
 logging:
   level: "INFO"  # DEBUG, INFO, WARNING, ERROR
