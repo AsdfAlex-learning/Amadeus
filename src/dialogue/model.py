@@ -18,6 +18,15 @@ class DialogueModel:
         self._device = "cpu"
         self._loaded = False
 
+    def _detect_device(self) -> str:
+        """Auto-detect best available device: CUDA > MPS > CPU."""
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+
     def load(self) -> bool:
         try:
             import torch
@@ -26,7 +35,7 @@ class DialogueModel:
             model_id = self._resolve_model_id()
             logger.info(f"Loading dialogue model: {model_id}")
 
-            self._device = "mps" if torch.backends.mps.is_available() else "cpu"
+            self._device = self._detect_device()
             load_kwargs = {"device_map": self._device, "torch_dtype": torch.float16}
             if self.quantization == "int8":
                 load_kwargs["load_in_8bit"] = True
