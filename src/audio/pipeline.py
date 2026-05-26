@@ -105,14 +105,18 @@ class AudioPipeline:
         self._audio_buffer.clear()
         self._silence_counter = 0
         self._speech_duration = 0.0
-        text = self.asr.transcribe(audio, self.capture.sample_rate)
-        if text:
-            logger.info(f"ASR: {text}")
-            for cb in self._text_callbacks:
-                try:
-                    cb(text)
-                except Exception as e:
-                    logger.error(f"Text callback error: {e}")
+        self._set_state(PipelineState.PROCESSING)
+        try:
+            text = self.asr.transcribe(audio, self.capture.sample_rate)
+            if text:
+                logger.info(f"ASR: {text}")
+                for cb in self._text_callbacks:
+                    try:
+                        cb(text)
+                    except Exception as e:
+                        logger.error(f"Text callback error: {e}")
+        finally:
+            self._set_state(PipelineState.LISTENING)
 
     def _set_state(self, state: PipelineState):
         if state != self._state:

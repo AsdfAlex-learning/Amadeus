@@ -34,6 +34,7 @@ class ConversationContext:
         while self._token_count > self.max_tokens and len(self._messages) > 1:
             removed = self._messages.pop(0)
             if removed["role"] == "system":
+                # Don't trim the primary system message (or an existing summary)
                 self._messages.insert(0, removed)
                 if len(self._messages) <= 1:
                     break
@@ -45,6 +46,30 @@ class ConversationContext:
                 if len(removed["content"]) > 200
                 else ""
             )
+            if self._summary:
+                self._inject_summary()
+
+    def _inject_summary(self):
+        summary_msg = {"role": "system", "content": self._summary}
+        # Find existing summary message (system role with content starting "[早期对话摘要")
+        insert_idx = 0
+        if self._messages and self._messages[0]["role"] == "system" and not self._messages[0]["content"].startswith("[早期对话摘要"):
+            insert_idx = 1
+        # Check if a summary already exists at insert_idx
+        if (
+            insert_idx < len(self._messages)
+            and self._messages[insert_idx]["role"] == "system"
+            and self._messages[insert_idx]["content"].startswith("[早期对话摘要")
+        ):
+            # Replace existing summary, adjust token count
+            old = self._messages[insert_idx]
+            self._token_count -= self._estimate_tokens(old["content"])
+            self._messages[insert_idx] = summary_msg
+            self._token_count += self._estimate_tokens(self._summary)
+        else:
+            self._messages.insert(insert_idx, summary_msg)
+            self._token_count += self._estimate_tokens(self._summary)
+        self._token_count = max(0, self._token_count)
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:

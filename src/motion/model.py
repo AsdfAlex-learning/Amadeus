@@ -356,9 +356,12 @@ class FullDuplexDiT(nn.Module):
                 nn.init.xavier_uniform_(param)
 
     def warmup(self, device: torch.device):
+        """Move all encoders to device and run a dummy forward for CUDA graph capture."""
         self.audio_encoder.warmup(device)
         self.visual_encoder.warmup(device)
         self.text_encoder.warmup(device)
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
         logger.info(f"FullDuplexDiT warmed up on {device}")
 
     def to_half(self):

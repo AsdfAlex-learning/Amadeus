@@ -38,6 +38,7 @@ def check_hardware(name: str) -> tuple[bool, str]:
         "Whisper 模型": ("models/whisper", None),
         "动作模型权重": ("models/motion/full_duplex_dit.pt", None),
         "Ollama": ("http://localhost:11434", None),
+        "CUDA GPU": ("torch.cuda", None),
     }
     if name == "麦克风":
         try:
@@ -87,6 +88,16 @@ def check_hardware(name: str) -> tuple[bool, str]:
             return True, "✅"
         except Exception:
             return False, "❌ 未运行"
+    elif name == "CUDA GPU":
+        try:
+            import torch
+            if torch.cuda.is_available():
+                name = torch.cuda.get_device_name(0)
+                mem = torch.cuda.get_device_properties(0).total_mem // (1024**3)
+                return True, f"✅ {name} ({mem}GB)"
+            return False, "❌ 无CUDA GPU"
+        except Exception:
+            return False, "❌ torch未安装"
 
 
 class DemoWindow(QMainWindow):
@@ -165,6 +176,7 @@ class DemoWindow(QMainWindow):
             ("硬件 & 模型", [
                 ("麦克风", check_hardware("麦克风")),
                 ("摄像头", check_hardware("摄像头")),
+                ("CUDA GPU", check_hardware("CUDA GPU")),
                 ("Live2D 模型", check_hardware("Live2D 模型")),
                 ("Whisper 模型", check_hardware("Whisper 模型")),
                 ("动作模型权重", check_hardware("动作模型权重")),
@@ -189,8 +201,9 @@ class DemoWindow(QMainWindow):
 
         has_live2d = any("Live2D" in l and "✅" in l for l in lines)
         has_audio = any("麦克风" in l and "✅" in l for l in lines)
-        has_ollama = any("Ollama" in l and "✅" in l for l in lines)
         has_camera = any("摄像头" in l and "✅" in l for l in lines)
+        has_ollama = any("Ollama" in l and "✅" in l for l in lines)
+        has_cuda = any("CUDA" in l and "✅" in l for l in lines)
 
         if has_live2d:
             lines.append("  ✅ Live2D 角色渲染")
@@ -214,6 +227,10 @@ class DemoWindow(QMainWindow):
             lines.append("  ✅ 摄像头感知")
         else:
             lines.append("  ⚠  摄像头不可用")
+        if has_cuda:
+            lines.append("  ✅ CUDA GPU 加速")
+        else:
+            lines.append("  ⚠  CPU 模式 (无CUDA)")
 
         lines.append("")
         lines.append("  文本 fallback 模式已激活 — 下方输入框可打字互动")

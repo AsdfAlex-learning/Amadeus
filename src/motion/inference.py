@@ -46,9 +46,17 @@ class DiffusionMotionInference:
         self._betas = betas
         self._alphas_cumprod = alphas_cumprod
 
+    def _detect_device(self) -> torch.device:
+        import torch
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+
     def load_model(self) -> bool:
         try:
-            self._device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+            self._device = self._detect_device()
             self._model = FullDuplexDiT(
                 num_params=self.num_params,
                 hidden_dim=320,
@@ -159,7 +167,10 @@ class DiffusionMotionInference:
             id_tensor = torch.tensor([self._character_id], device=self._device)
             prompts = [self._current_prompt] if self._current_prompt else [""]
 
-            B, T = 1, 49
+            B = 1
+            # Hubert-base stride = 320 samples at 16kHz → 50 features/sec
+            # T is derived from audio encoder output length
+            T = 50
             params = torch.randn(B, T, self.num_params, device=self._device)
 
             timesteps = torch.linspace(
