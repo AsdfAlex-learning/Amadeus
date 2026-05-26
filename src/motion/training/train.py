@@ -22,31 +22,60 @@ def train(
     num_diffusion_steps: int = 1000,
     device: str = "auto",
     use_amp: bool = True,
+    dataset_type: str = "preprocessed",
+    val_split: float = 0.1,
+    resume_from: str | None = None,
 ):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if device == "auto":
-        if torch.backends.mps.is_available():
-            device = "mps"
-        elif torch.cuda.is_available():
+        if torch.cuda.is_available():
             device = "cuda"
+        elif torch.backends.mps.is_available():
+            device = "mps"
         else:
             device = "cpu"
     logger.info(f"Training Full-Duplex DiT on {device}")
 
-    dataset = MotionDataset(data_dir)
-    if len(dataset) == 0:
+    # Precompute diffusion schedule (DDPM linear)
+    betas = torch.linspace(1e-4, 0.02, num_diffusion_steps)
+    alphas = 1.0 - betas
+    _alphas_cumprod = torch.cumprod(alphas, dim=0)
+
+    full_dataset = MotionDataset(data_dir, dataset_type=dataset_type)
+    if len(full_dataset) == 0:
         logger.error(f"No samples found in {data_dir}")
         return
 
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    # Train/val split
+    val_size = max(1, int(len(full_dataset) * val_split)) if val_split > 0 else 0
+    train_size = len(full_dataset) - val_size
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        full_dataset, [train_size, val_size]
+    )
+    logger.info(f"Dataset: {train_size} train / {val_size} val samples")
+
+    dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0) if val_size > 0 else None
     model = FullDuplexDiT(
         num_params=num_params,
         hidden_dim=hidden_dim,
         num_layers=num_layers,
         use_gradient_checkpointing=(device in ("cuda", "mps")),
     ).to(device)
+
+    # Resume from checkpoint if provided
+    start_epoch = 0
+    if resume_from is not None:
+        resume_path = Path(resume_from)
+        if resume_path.exists():
+            state = torch.load(resume_path, map_location=device)
+            model.load_state_dict(state)
+            start_epoch = int(resume_path.stem.split("_")[-1]) + 1
+            logger.info(f"Resumed from {resume_path} (epoch {start_epoch})")
+        else:
+            logger.warning(f"Resume checkpoint not found: {resume_path}")
 
     trainable = model.get_trainable_param_count()
     total = model.get_total_param_count()
@@ -58,23 +87,30 @@ def train(
     scaler = torch.amp.GradScaler(device) if use_amp and device == "cuda" else None
 
     model.train()
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         total_loss = 0.0
         optimizer.zero_grad()
-        for batch_idx, (audio, motion) in enumerate(dataloader):
-            audio = audio.to(device)
-            motion = motion.to(device)
-            B, _ = audio.shape[0], motion.shape[1]
-            tts_audio = torch.zeros_like(audio)
-            visual = torch.zeros(B, 5, 3, 224, 224, device=device)
-            identity = torch.zeros(B, dtype=torch.long, device=device)
-            prompts = [""] * B
+        for batch_idx, batch in enumerate(dataloader):
+            audio = batch["user_audio"].to(device)
+            motion = batch["motion"].to(device)
+            B = audio.shape[0]
+            tts_audio = batch.get("tts_audio", torch.zeros_like(audio)).to(device)
+            visual = batch.get("visual_frames", torch.zeros(B, 5, 3, 224, 224, device=device)).to(device)
+            identity = batch.get("identity_id", torch.zeros(B, dtype=torch.long, device=device)).to(device)
+            prompts = batch.get("text_prompt", [""] * B)
+            if isinstance(prompts, list):
+                pass  # already a list
+            else:
+                prompts = [""] * B
 
             t = torch.randint(0, num_diffusion_steps, (B,), device=device)
             noise = torch.randn_like(motion)
-            noisy = motion + noise * (1.0 - 1e-4) * (t.float() / num_diffusion_steps).unsqueeze(
-                -1
-            ).unsqueeze(-1)
+
+            # Standard DDPM forward process: x_t = sqrt(alpha_cumprod_t) * x_0 + sqrt(1 - alpha_cumprod_t) * noise
+            alpha_cumprod_t = _alphas_cumprod[t].unsqueeze(-1).unsqueeze(-1).to(device)
+            sqrt_alpha_cumprod_t = torch.sqrt(alpha_cumprod_t)
+            sqrt_one_minus_alpha_cumprod_t = torch.sqrt(1.0 - alpha_cumprod_t)
+            noisy = sqrt_alpha_cumprod_t * motion + sqrt_one_minus_alpha_cumprod_t * noise
 
             with torch.amp.autocast(device_type=device, enabled=scaler is not None):
                 pred = model(audio, tts_audio, visual, prompts, identity, t, noisy)
@@ -100,14 +136,45 @@ def train(
 
         scheduler.step()
         avg_loss = total_loss / max(len(dataloader), 1)
+
+        # Validation loss
+        val_loss = 0.0
+        if val_loader is not None:
+            model.eval()
+            with torch.no_grad():
+                for batch in val_loader:
+                    motion = batch["motion"].to(device)
+                    audio = batch["user_audio"].to(device)
+                    B = audio.shape[0]
+                    tts_audio = batch.get("tts_audio", torch.zeros_like(audio)).to(device)
+                    visual = batch.get("visual_frames", torch.zeros(B, 5, 3, 224, 224, device=device)).to(device)
+                    identity = batch.get("identity_id", torch.zeros(B, dtype=torch.long, device=device)).to(device)
+                    prompts = batch.get("text_prompt", [""] * B)
+                    t = torch.randint(0, num_diffusion_steps, (B,), device=device)
+                    noise = torch.randn_like(motion)
+                    alpha_cumprod_t = _alphas_cumprod[t].unsqueeze(-1).unsqueeze(-1).to(device)
+                    noisy = torch.sqrt(alpha_cumprod_t) * motion + torch.sqrt(1.0 - alpha_cumprod_t) * noise
+                    with torch.amp.autocast(device_type=device, enabled=scaler is not None):
+                        pred = model(audio, tts_audio, visual, prompts, identity, t, noisy)
+                        val_loss += criterion(pred, noise).item()
+            val_loss /= max(len(val_loader), 1)
+            model.train()
+
+        log_msg = f"Epoch {epoch + 1}/{num_epochs} | Loss: {avg_loss:.6f} | LR: {scheduler.get_last_lr()[0]:.2e}"
+        if val_loader is not None:
+            log_msg += f" | Val: {val_loss:.6f}"
+        logger.info(log_msg)
+
+        # Save checkpoint every 10 epochs
         if (epoch + 1) % 10 == 0:
-            logger.info(
-                f"Epoch {epoch + 1}/{num_epochs} | Loss: {avg_loss:.6f} | LR: {scheduler.get_last_lr()[0]:.2e}"
-            )
+            checkpoint_path = output_dir / f"full_duplex_dit_epoch_{epoch + 1:04d}.pt"
+            torch.save(model.state_dict(), checkpoint_path)
+            logger.info(f"Checkpoint saved: {checkpoint_path}")
 
     checkpoint_path = output_dir / "full_duplex_dit.pt"
     torch.save(model.state_dict(), checkpoint_path)
     logger.info(f"Model saved to {checkpoint_path}")
+    return model
 
 
 if __name__ == "__main__":
@@ -125,6 +192,13 @@ if __name__ == "__main__":
     parser.add_argument("--num_layers", type=int, default=4)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--no_amp", action="store_true")
+    parser.add_argument("--dataset_type", type=str, default="preprocessed",
+                        choices=["preprocessed", "mead", "biwi", "vocaset"],
+                        help="Dataset format type")
+    parser.add_argument("--val_split", type=float, default=0.1,
+                        help="Validation split ratio (0=no validation)")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Resume from checkpoint path")
     args = parser.parse_args()
 
     train(
@@ -139,4 +213,7 @@ if __name__ == "__main__":
         num_layers=args.num_layers,
         device=args.device,
         use_amp=not args.no_amp,
+        dataset_type=args.dataset_type,
+        val_split=args.val_split,
+        resume_from=args.resume,
     )
