@@ -1,0 +1,304 @@
+# ARKit blendshape names -> Live2D parameter mapping
+# Each Live2D param can have multiple ARKit sources with weights and optional bias.
+#
+# Mapping types:
+#   - head_angle:  source = pitch|yaw|roll; value = clamp(angle_deg * scale + bias, 0, 1)
+#   - blendshape:  sources = [{name, weight}, ...]; value = clamp(sum(weight*bs) + bias, 0, 1)
+#   - constant:    value = constant clamped to [0, 1]
+
+live2d_param_order:
+  # 0-2: Head rotation
+  - ParamAngleX      # head yaw
+  - ParamAngleY      # head pitch
+  - ParamAngleZ      # head roll
+  # 3-5: Body rotation
+  - ParamBodyAngleX
+  - ParamBodyAngleY
+  - ParamBodyAngleZ
+  # 6-7: Eyes
+  - ParamEyeLOpen
+  - ParamEyeROpen
+  # 8-9: Eye gaze
+  - ParamEyeBallX
+  - ParamEyeBallY
+  # 10-13: Brows
+  - ParamBrowLX
+  - ParamBrowLY
+  - ParamBrowRX
+  - ParamBrowRY
+  # 14-17: Mouth / cheek / breath
+  - ParamMouthOpenY
+  - ParamMouthForm
+  - ParamCheek
+  - ParamBreath
+  # 18-21: Arms (no ARKit source -- zeroed)
+  - ParamArmLX
+  - ParamArmLY
+  - ParamArmRX
+  - ParamArmRY
+  # 22-25: Hair physics (no ARKit source -- zeroed)
+  - ParamHairFront
+  - ParamHairBack
+  - ParamHairSideL
+  - ParamHairSideR
+  # 26-44: Various (no direct ARKit mapping -- zeroed with sensible defaults)
+  - ParamTear
+  - ParamBlush
+  - ParamNose
+  - ParamLipUpper
+  - ParamLipLower
+  - ParamTongue
+  - ParamEarL
+  - ParamEarR
+  - ParamTail
+  - ParamWingL
+  - ParamWingR
+  - ParamItem1
+  - ParamItem2
+  - ParamItem3
+  - ParamExtra1
+  - ParamExtra2
+  - ParamExtra3
+  - ParamExtra4
+  - ParamExtra5
+
+mappings:
+  ParamAngleX:
+    type: head_angle
+    source: yaw
+    scale: 0.015     # degrees -> 0-1 range (+/-30 deg -> +/-0.45, centered at 0.5)
+    bias: 0.5
+
+  ParamAngleY:
+    type: head_angle
+    source: pitch
+    scale: -0.015    # negative because pitch up = negative in Live2D
+    bias: 0.5
+
+  ParamAngleZ:
+    type: head_angle
+    source: roll
+    scale: -0.015
+    bias: 0.5
+
+  ParamBodyAngleX:
+    type: head_angle
+    source: yaw
+    scale: 0.005     # body follows head with less amplitude
+    bias: 0.5
+
+  ParamBodyAngleY:
+    type: head_angle
+    source: pitch
+    scale: -0.005
+    bias: 0.5
+
+  ParamBodyAngleZ:
+    type: head_angle
+    source: roll
+    scale: -0.005
+    bias: 0.5
+
+  ParamEyeLOpen:
+    type: blendshape
+    sources:
+      - name: eyeBlinkLeft
+        weight: -1.0  # blink=1 -> eye closed -> ParamEyeLOpen=0
+    bias: 1.0         # default open
+
+  ParamEyeROpen:
+    type: blendshape
+    sources:
+      - name: eyeBlinkRight
+        weight: -1.0
+    bias: 1.0
+
+  ParamEyeBallX:
+    type: blendshape
+    sources:
+      - name: eyeLookOutLeft
+        weight: 1.0
+      - name: eyeLookInLeft
+        weight: -1.0
+    bias: 0.5
+
+  ParamEyeBallY:
+    type: blendshape
+    sources:
+      - name: eyeLookUpLeft
+        weight: 0.5
+      - name: eyeLookDownLeft
+        weight: -0.5
+    bias: 0.5
+
+  ParamBrowLX:
+    type: blendshape
+    sources:
+      - name: browOuterUpLeft
+        weight: 0.5
+    bias: 0.5
+
+  ParamBrowLY:
+    type: blendshape
+    sources:
+      - name: browInnerUp
+        weight: 0.5
+      - name: browDownLeft
+        weight: -0.5
+    bias: 0.5
+
+  ParamBrowRX:
+    type: blendshape
+    sources:
+      - name: browOuterUpRight
+        weight: 0.5
+    bias: 0.5
+
+  ParamBrowRY:
+    type: blendshape
+    sources:
+      - name: browInnerUp
+        weight: 0.5
+      - name: browDownRight
+        weight: -0.5
+    bias: 0.5
+
+  ParamMouthOpenY:
+    type: blendshape
+    sources:
+      - name: jawOpen
+        weight: 1.0
+      - name: mouthClose
+        weight: -0.5
+    bias: 0.0
+
+  ParamMouthForm:
+    type: blendshape
+    sources:
+      - name: mouthSmileLeft
+        weight: 0.5
+      - name: mouthSmileRight
+        weight: 0.5
+      - name: mouthFrownLeft
+        weight: -0.5
+      - name: mouthFrownRight
+        weight: -0.5
+    bias: 0.5
+
+  ParamCheek:
+    type: blendshape
+    sources:
+      - name: cheekPuff
+        weight: 1.0
+    bias: 0.0
+
+  ParamBreath:
+    type: constant
+    value: 0.0
+
+  # Arms -- no ARKit source, default to neutral
+  ParamArmLX:
+    type: constant
+    value: 0.0
+  ParamArmLY:
+    type: constant
+    value: 0.0
+  ParamArmRX:
+    type: constant
+    value: 0.0
+  ParamArmRY:
+    type: constant
+    value: 0.0
+
+  # Hair -- physics-driven, no ARKit source
+  ParamHairFront:
+    type: constant
+    value: 0.0
+  ParamHairBack:
+    type: constant
+    value: 0.0
+  ParamHairSideL:
+    type: constant
+    value: 0.0
+  ParamHairSideR:
+    type: constant
+    value: 0.0
+
+  # Remaining params -- no direct ARKit mapping
+  ParamTear:
+    type: constant
+    value: 0.0
+  ParamBlush:
+    type: blendshape
+    sources:
+      - name: cheekSquintLeft
+        weight: 0.3
+      - name: cheekSquintRight
+        weight: 0.3
+    bias: 0.0
+  ParamNose:
+    type: blendshape
+    sources:
+      - name: noseSneerLeft
+        weight: 0.5
+      - name: noseSneerRight
+        weight: 0.5
+    bias: 0.0
+  ParamLipUpper:
+    type: blendshape
+    sources:
+      - name: mouthUpperUpLeft
+        weight: 0.5
+      - name: mouthUpperUpRight
+        weight: 0.5
+    bias: 0.0
+  ParamLipLower:
+    type: blendshape
+    sources:
+      - name: mouthLowerDownLeft
+        weight: 0.5
+      - name: mouthLowerDownRight
+        weight: 0.5
+    bias: 0.0
+  ParamTongue:
+    type: constant
+    value: 0.0
+  ParamEarL:
+    type: constant
+    value: 0.0
+  ParamEarR:
+    type: constant
+    value: 0.0
+  ParamTail:
+    type: constant
+    value: 0.0
+  ParamWingL:
+    type: constant
+    value: 0.0
+  ParamWingR:
+    type: constant
+    value: 0.0
+  ParamItem1:
+    type: constant
+    value: 0.0
+  ParamItem2:
+    type: constant
+    value: 0.0
+  ParamItem3:
+    type: constant
+    value: 0.0
+  ParamExtra1:
+    type: constant
+    value: 0.0
+  ParamExtra2:
+    type: constant
+    value: 0.0
+  ParamExtra3:
+    type: constant
+    value: 0.0
+  ParamExtra4:
+    type: constant
+    value: 0.0
+  ParamExtra5:
+    type: constant
+    value: 0.0
