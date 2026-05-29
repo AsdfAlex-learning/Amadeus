@@ -13,17 +13,26 @@ Amadeus is a desktop application that combines a customizable Live2D character w
 ```
  Microphone ──→ Whisper.cpp ASR ──→ Qwen2.5 3B ──→ TTS ──→ Speaker
      │                                    │
-     └──→ Mini-LPM (15M) ──→ Live2D Params
-              │                         │
+     └──→ FullDuplexDiT (124M) ──→ Live2D Params (45)
+              │                               │
      Camera Perception ────→ Live2D Renderer (PySide6 + live2d-py)
+              │
+     Preprocessing Pipeline ──→ Training Data (.npz)
+              │
+     LoRA Adapters ──→ Character-specific Performance
 ```
 
 ## Features
 
-- **Real-time Conversation**: Voice-driven dialogue with a distilled local LLM (Qwen2.5 3B)
+- **Real-time Conversation**: Voice-driven dialogue with a local LLM (Qwen2.5 3B)
 - **Live2D Avatar**: Character rendering with live2d-py + PySide6/OpenGL
-- **Mini-LPM Motion Model**: Audio-to-Live2D-parameters generation (Hubert + Transformer, 15M trainable params)
-- **Camera Perception**: Face detection, gaze estimation, expression recognition via MediaPipe
+- **FullDuplexDiT Motion Model**: Multimodal diffusion transformer (Hubert + DiT + CNN, 124M/24M params)
+  - Three states: Listen (user audio), Speak (TTS audio), Silence (camera context)
+  - 4-step DDIM inference at 50Hz parameter output
+- **Character LoRA**: Low-rank fine-tuning (~MB per character) for character-specific motion style
+- **Persona Performance Parameters**: Gesture scale, react speed, expressiveness, and more — configurable per persona
+- **Video → Training Data Pipeline**: MediaPipe FaceLandmarker + ARKit → Live2D parameter mapping
+- **Camera Perception**: FaceMesh face detection, gaze estimation, expression analysis
 - **Pluggable Characters**: Framework-first design — swap Live2D models and personas
 - **Full Local**: All models run locally on consumer hardware (M2 / RTX 4060)
 
@@ -65,13 +74,22 @@ python -m src.main
 ### Training the Motion Model
 
 ```bash
-# Prepare data: .wav audio files + .npy motion parameter files in a directory
-# Then train:
+# Prepare data via preprocessing pipeline
+python -m src.motion.preprocess.pipeline --input video.mp4 --output data/preprocessed/
+
+# Train base model
 python -m src.motion.training.train \
-    --data_dir data/mead \
+    --data_dir data/preprocessed \
     --output_dir models/motion \
     --num_params 45 \
     --epochs 100
+
+# LoRA fine-tuning for a specific character
+python -m src.motion.training.train \
+    --data_dir data/character/ \
+    --output_dir models/lora/kurisu \
+    --use_lora --lora_rank 8 --lora_alpha 16 \
+    --epochs 50
 ```
 
 ## Project Structure
@@ -80,7 +98,7 @@ python -m src.motion.training.train \
 Amadeus/
 ├── src/
 │   ├── main.py                  # Application entry point
-│   ├── config.py                # YAML configuration loader
+│   ├── config.py                # YAML configuration loader + typed accessors
 │   ├── app/
 │   │   ├── window.py            # PySide6 main window (261 lines)
 │   │   └── live2d_widget.py     # OpenGL Live2D widget (79 lines)
@@ -95,17 +113,32 @@ Amadeus/
 │   │   ├── persona.py           # Character persona management
 │   │   └── context.py           # Conversation context window
 │   ├── motion/
-│   │   ├── model.py             # Mini-LPM architecture (Hubert+Transformer)
-│   │   ├── inference.py         # Real-time inference pipeline
+│   │   ├── model.py             # FullDuplexDiT architecture (Hubert+DiT+CNN, 432 lines)
+│   │   ├── inference.py         # Real-time inference pipeline (4-step DDIM)
+│   │   ├── performance.py       # PerformanceEngine (persona param post-processing)
+│   │   ├── preprocess/
+│   │   │   ├── face_landmarker.py   # MediaPipe FaceLandmarker + ARKit blendshapes
+│   │   │   ├── arkit_to_live2d.py   # YAML mapping 52 ARKit → 45 Live2D
+│   │   │   ├── video_reader.py      # FFmpeg video/audio extraction
+│   │   │   ├── body_skeleton.py     # YOLOv8-pose stub (deferred)
+│   │   │   ├── pipeline.py          # End-to-end preprocessing orchestrator
+│   │   │   └── mappings/default.yaml  # 45-parameter mapping config
 │   │   └── training/
-│   │       ├── dataset.py       # Training data loader
-│   │       └── train.py         # Training script
+│   │       ├── dataset.py       # MotionDataset (multimodal dict, 50Hz alignment)
+│   │       ├── train.py         # Training script (LoRA integration, val split, resume)
+│   │       └── lora.py          # LoRA module (495 lines, full lifecycle API)
 │   ├── tts/
 │   │   └── engine.py            # TTS engine (multi-backend)
 │   └── perception/
-│       └── camera.py            # Camera + MediaPipe perception
+│       └── camera.py            # Camera + MediaPipe FaceMesh perception
 ├── config/
-│   └── default.yaml             # Default configuration
+│   └── default.yaml             # Default configuration (app/live2d/audio/asr/dialogue/tts/motion/perception/training/lora/preprocess/performance)
+├── docs/
+│   ├── ARCHITECTURE.md          # Detailed architecture documentation
+│   └── adr/0001-base-model-lora-architecture.md  # ADR: Base Model + LoRA
+├── scripts/
+│   ├── download_models.py       # Download encoder weights (Hubert+MobileNet+BERT)
+│   └── setup_windows.ps1        # Windows 11 environment setup
 ├── environment.yml              # Conda locked environment
 ├── requirements-lock.txt        # Pip locked requirements
 ├── requirements.txt             # Pip flexible requirements
@@ -137,10 +170,12 @@ Our Mini-LPM adapts this concept to operate in **Live2D parameter space** instea
 
 | Property | Value |
 |---|---|
-| Architecture | Hubert encoder + 4-layer Transformer + CNN decoder |
-| Total Params | 109M (94M frozen Hubert + 15M trainable) |
-| Input | 1-sec audio @ 16kHz (16,000 samples) |
-| Output | 49 frames × 45 Live2D parameters |
+| Architecture | Hubert encoder + 4-layer Interlaced DiT (Listen/Speak) + CNN decoder |
+| Total Params | 124M (94M frozen Hubert + 24M trainable DiT + CNN) |
+| Input | 5-stream multimodal: user audio, TTS audio, camera frames, text prompt, character ID |
+| Output | 50 frames × 45 Live2D parameters |
+| LoRA Params | ~500K per character (rank=8), ~MB per character |
+| Inference | 4-step DDIM, real-time at 50Hz |
 | Reference | NVIDIA Audio2Face-3D v2.3 (40M, real-time) |
 
 ### Dialogue Model
@@ -187,11 +222,11 @@ pytest tests/
 - [x] Phase 1: Project skeleton + Live2D rendering
 - [x] Phase 2: Audio pipeline (capture + ASR + VAD)
 - [x] Phase 3: Dialogue model (LLM + persona + context)
-- [x] Phase 4: Mini-LPM motion model (architecture + inference + training)
+- [x] Phase 4: FullDuplexDiT motion model (architecture + inference + training)
 - [x] Phase 5: TTS engine (multi-backend)
 - [x] Phase 6: Camera perception (face + gaze + expression)
-- [ ] Phase 7: Data preprocessing (video → facial landmarks → Live2D parameters)
-- [ ] Phase 8: Model training & distillation pipeline
+- [x] Phase 7: Data preprocessing (video → facial landmarks → Live2D parameters)
+- [ ] Phase 8: Model training & data pipeline validation
 - [ ] Phase 9: Memory system integration (LLMChatFlow)
 - [ ] Phase 10: Multi-character support & live swapping
 

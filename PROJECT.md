@@ -534,27 +534,35 @@ flowchart LR
 
 ## 7. 开发路线图
 
-### 已完成 (v0.1.0)
+### 已完成 (v0.1.0 → v0.2.0-dev)
 
 - [x] **Phase 1**: 项目骨架 + PySide6 窗口 + Live2D 渲染
 - [x] **Phase 2**: 音频管线 (PyAudio 采集 + VAD + Whisper.cpp ASR)
 - [x] **Phase 3**: 对话模型 (Qwen2.5-3B + 人格系统 + 上下文窗口)
 - [x] **Phase 4**: Full-Duplex DiT 动作模型 (多模态DiT + Listen/Speak交错层 + 扩散推理 + 离线缓存)
 - [x] **Phase 5**: TTS 引擎 (多后端 + fallback)
-- [x] **Phase 6**: 摄像头感知 (原始帧 → 模型, 无状态机)
+- [x] **Phase 6**: 摄像头感知 (MediaPipe FaceMesh + 回调管线)
+- [x] **Phase 7**: 数据预处理工具链
+  - 视频 → 面部关键点提取 (MediaPipe FaceLandmarker + ARKit blendshapes)
+  - ARKit → Live2D 参数空间映射 (YAML配置化)
+  - 视频读取 + 音频提取 (FFmpeg)
+  - 端到端管线编排 + CLI入口
+  - 身体骨骼提取 (YOLOv8-pose, stub延迟到MVP后)
+- [x] **LoRA 训练模块**: Character LoRA (LoRALinear / LoRAConv1d + 完整生命周期API)
+- [x] **LoRA 集成到 train.py**: `--use_lora` / `--lora_rank` / `--lora_alpha` 参数
+- [x] **Persona 表演参数**: PerformanceEngine (6参数: gesture_scale, react_speed, expressiveness, mouth_open_max, head_motion_range, idle_energy)
+- [x] **配置统一**: training / lora / preprocess / performance 配置段 + 类型化访问器
 - [x] 环境锁定 (39 包, Python 3.11.5)
 - [x] CI/CD (ruff lint + basedpyright type check)
 - [x] 文档 (README, ARCHITECTURE, CONTRIBUTING, CHANGELOG, PROJECT)
+- [x] Windows 设置脚本 (`scripts/setup_windows.ps1`)
 
 ### 计划中
 
-- [ ] **Phase 7**: 数据预处理工具链
-  - 视频 → 面部关键点提取 (MediaPipe / OpenFace)
-  - 关键点 → Live2D 参数空间映射
-  - 数据集批量处理脚本
-- [ ] **Phase 8**: 模型训练与蒸馏
-  - Mini-LPM 在 MEAD 数据集上训练
-  - Qwen2.5-72B → 3B 知识蒸馏
+- [ ] **Phase 8**: 模型训练与数据
+  - FullDuplexDiT 在训练数据上训练（需 CUDA torch + 模型权重下载）
+  - 端到端预处理管线验证（样本视频 → .npz）
+  - LoRA 微调验证（apply → train → save → load 周期）
   - 训练配置与超参调优
 - [ ] **Phase 9**: 记忆系统集成 (LLMChatFlow)
   - 向量数据库长期记忆
@@ -564,6 +572,9 @@ flowchart LR
   - 运行时 Live2D 模型切换
   - 人设热加载
   - 角色配置管理界面
+- [ ] **SilencePrompt 生成器**: 让 Silence 状态更自然
+  - 时间感知 + 对话上下文 + 情绪延续 + 微行为随机化 → 自然语言 prompt
+  - 实现"角色想听你说"的错觉
 
 ### 远期展望
 
@@ -636,17 +647,20 @@ Amadeus/
 ├── PROJECT.md                   # 本文档 — 详细技术说明
 ├── CHANGELOG.md                 # 版本记录
 ├── CONTRIBUTING.md              # 贡献指南
+├── DEMO_MISSING.md              # Demo → 完整系统所需步骤
 ├── pyproject.toml               # 项目元数据 & 工具配置
 ├── environment.yml              # Conda 锁定环境 (39 包)
 ├── requirements-lock.txt        # Pip 锁定依赖 (39 包)
 ├── requirements.txt             # Pip 宽松依赖
 ├── config/
-│   └── default.yaml             # 全局默认配置
+│   └── default.yaml             # 全局默认配置 (training/lora/preprocess/performance)
 ├── docs/
-│   └── ARCHITECTURE.md          # 架构详解
+│   ├── ARCHITECTURE.md          # 架构详解
+│   └── adr/
+│       └── 0001-base-model-lora-architecture.md  # ADR: Base Model + LoRA
 ├── src/
 │   ├── main.py                  # 应用入口
-│   ├── config.py                # 配置加载器
+│   ├── config.py                # 配置加载器 + 类型化访问器
 │   ├── app/
 │   │   ├── window.py            # 主窗口 (261 行)
 │   │   └── live2d_widget.py     # OpenGL 渲染 (79 行)
@@ -655,23 +669,36 @@ Amadeus/
 │   ├── audio/
 │   │   ├── capture.py           # 麦克风采集
 │   │   ├── asr.py               # 语音识别
-│   │   └── pipeline.py          # 管线编排
+│   │   └── pipeline.py          # 管线编排 + PROCESSING状态
 │   ├── dialogue/
-│   │   ├── model.py             # LLM 推理
+│   │   ├── model.py             # LLM 推理 (CUDA>MPS>CPU优先级)
 │   │   ├── persona.py           # 人设管理
-│   │   └── context.py           # 上下文窗口
+│   │   └── context.py           # 上下文窗口 + 摘要
 │   ├── motion/
-│   │   ├── model.py             # FullDuplexDiT (300行)
-│   │   ├── inference.py         # 扩散推理管线
+│   │   ├── model.py             # FullDuplexDiT (432行)
+│   │   ├── inference.py         # 扩散推理管线 (T=50, 4-step DDIM)
+│   │   ├── performance.py       # PerformanceEngine (6 persona params)
+│   │   ├── __init__.py          # 导出 PerformanceConfig + PerformanceEngine
+│   │   ├── preprocess/
+│   │   │   ├── face_landmarker.py   # MediaPipe FaceLandmarker + ARKit blendshapes
+│   │   │   ├── arkit_to_live2d.py   # YAML映射 52 ARKit→45 Live2D
+│   │   │   ├── video_reader.py      # FFmpeg 视频/音频提取
+│   │   │   ├── body_skeleton.py     # YOLOv8-pose stub
+│   │   │   ├── pipeline.py          # 端到端预处理编排 + CLI
+│   │   │   └── mappings/
+│   │   │       └── default.yaml     # 45参数映射配置
 │   │   └── training/
-│   │       ├── dataset.py       # 数据加载
-│   │       └── train.py         # 训练脚本
+│   │       ├── dataset.py       # MotionDataset (多模态dict, 50Hz对齐)
+│   │       ├── train.py         # 训练脚本 (LoRA集成, val split, resume)
+│   │       ├── lora.py          # LoRA模块 (495行, 完整生命周期API)
+│   │       └── __init__.py      # 导出 MotionDataset + LoRA classes
 │   ├── tts/
 │   │   └── engine.py            # TTS 引擎
 │   └── perception/
-│       └── camera.py            # 摄像头特征提取
+│       └── camera.py            # CameraPerception + MediaPipe FaceMesh
 ├── scripts/
-│   └── download_models.py       # 离线权重下载
+│   ├── download_models.py       # 离线权重下载 (Hubert+MobileNet+BERT)
+│   └── setup_windows.ps1        # Windows 11 环境设置脚本
 ├── models/                      # 模型文件 (gitignore)
 ├── assets/live2d/               # Live2D 角色文件 (gitignore)
 └── tests/                       # 测试文件

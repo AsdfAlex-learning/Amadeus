@@ -88,43 +88,62 @@ VAD is energy-based (RMS threshold). Includes pre-speech buffer (300ms) to avoid
 
 ### 5. Motion Model (`src/motion/`)
 
-**MiniLPM** (`model.py`): Core architecture:
+**FullDuplexDiT** (`model.py`): Core architecture — multimodal Diffusion Transformer with interlaced Listen/Speak layers. Five input streams: user audio, TTS audio, camera frames, text prompt, character identity. Output: 50 frames × 45 Live2D parameters.
 
 ```
-Audio (16kHz, 1sec)
-    │
-    ▼
-┌─────────────────┐
-│ Hubert Encoder  │  ← facebook/hubert-base-ls960 (frozen, 94M)
-│ (768-dim @50Hz) │
-└────────┬────────┘
-         │
-    ┌────▼────┐
-    │ Linear  │  768 → 512
-    └────┬────┘
-         │
-    ┌────▼────────┐
-    │ Positional  │
-    │  Encoding   │
-    └────┬────────┘
-         │
-    ┌────▼────────────┐
-    │ Transformer      │  4 layers, 8 heads, 512-dim, GELU
-    │ Encoder          │
-    └────┬────────────┘
-         │
-    ┌────▼────────┐
-    │ CNN Decoder  │  Conv1d ×3 → Sigmoid
-    │ (45 params)  │
-    └─────────────┘
-         │
-         ▼
-   Live2D Parameters (49 frames × 45 values)
+User Audio (16kHz, 1sec)     TTS Audio (16kHz, 1sec)     Camera Frames (5×224×224)
+        │                            │                           │
+        ▼                            ▼                           ▼
+┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
+│  Hubert Encoder  │    │  Hubert Encoder  │    │ MobileNetV3      │
+│  (frozen, 94M)   │    │  (shared, 94M)   │    │ (frozen, 2.5M)   │
+│  768-dim @50Hz   │    │  768-dim @50Hz   │    │ 512-dim @50Hz    │
+└────────┬─────────┘    └────────┬─────────┘    └────────┬─────────┘
+         │                       │                       │
+         ▼                       ▼                       ▼
+    ┌─────────┐            ┌─────────┐            ┌─────────┐
+    │ Linear  │            │ Linear  │            │  Align  │
+    │ 768→320 │            │ 768→320 │            │ 512→320 │
+    └────┬────┘            └────┬────┘            └────┬────┘
+         │                       │                       │
+         └───────────┬───────────┘         ┌─────────────┘
+                     │                     │
+                     ▼                     ▼
+              ┌────────────────────────────────────┐
+              │    DiT Interlaced Blocks (4 layers) │
+              │  Even layers: Listen (cross-attn    │
+              │    with user audio + visual)        │
+              │  Odd layers:  Speak (cross-attn     │
+              │    with TTS audio + text prompt)    │
+              │  dim=320, 8 heads, AdaLN + FFN      │
+              └────────────────┬───────────────────┘
+                               │
+                               ▼
+                      ┌────────────────┐
+                      │  CNN Decoder   │
+                      │  Conv1d ×3 +   │
+                      │  Sigmoid       │
+                      └───────┬────────┘
+                              │
+                              ▼
+                  Live2D Parameters (50 frames × 45 values)
 ```
 
-**MotionInference** (`inference.py`): Streaming inference with overlap-add. Maintains an audio buffer, processes chunks of `chunk_size` seconds, and emits parameter dictionaries frame-by-frame to callbacks.
+**PerformanceEngine** (`performance.py`): Persona-based post-processing on model output. Six configurable parameters applied as multiplicative adjustments in vectorized numpy. EMA temporal smoothing for `react_speed`. Supports 2D/3D arrays + silence/speak/listen modes.
 
-**Training** (`training/`): PyTorch dataset and training loop. Expects paired `.wav` (16kHz mono) and `.npy` (frames × params) files. Uses MSE loss + AdamW + cosine annealing.
+**Preprocessing Pipeline** (`preprocess/`): Video → training data workflow:
+- `face_landmarker.py`: MediaPipe FaceLandmarker → 52 ARKit blendshapes + head pose
+- `arkit_to_live2d.py`: YAML-configurable weight mapping → 45 Live2D params
+- `video_reader.py`: FFmpeg audio extraction + frame extraction
+- `pipeline.py`: End-to-end orchestrator with CLI entry point
+- `body_skeleton.py`: YOLOv8-pose stub (deferred from MVP)
+
+**Training** (`training/`):
+- `dataset.py`: `MotionDataset` — multimodal dict format, 50Hz alignment, .npz + legacy .npy/.wav support
+- `train.py`: DDPM training loop with val split, epoch checkpointing, resume, `--dataset_type`, and full LoRA integration (`--use_lora`, `--lora_rank`, `--lora_alpha`)
+- `lora.py`: LoRA training module — `LoRALinear` / `LoRAConv1d` wrappers, `apply/remove/merge/save/load_lora` lifecycle API, monkey-patching approach (no model.py modification)
+
+**Inference** (`inference.py`): Streaming diffusion inference with overlap-add. Maintains audio/visual buffers, processes chunks of `chunk_size` seconds via 4-step DDIM, emits parameter dictionaries frame-by-frame to callbacks. T=50 frames per second of audio (aligned with Hubert stride).
 
 ### 6. TTS (`src/tts/`)
 

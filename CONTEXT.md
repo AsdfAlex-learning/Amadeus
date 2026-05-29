@@ -18,8 +18,11 @@
 | **Dialogue Model** | `src/dialogue/` | LLM inference, persona management, conversation context |
 | **Performance Engine** | `src/motion/` | FullDuplexDiT — multimodal diffusion model that generates Performance |
 | **TTS Engine** | `src/tts/` | Synthesizes speech from dialogue text. Both an input to and output of Performance |
-| **Perception** | `src/perception/` | Camera capture — raw frames fed to Performance Engine. MicroExpNet detects micro-expressions; YOLO detects face presence and gaze direction |
+| **Perception** | `src/perception/` | Camera capture — raw frames fed to Performance Engine. MediaPipe FaceMesh for face presence, gaze, and expression |
 | **Renderer** | `src/live2d/` | live2d-py wrapper — consumes Performance parameters and renders the Character |
+| **Preprocessing** | `src/motion/preprocess/` | Video → training data pipeline. FaceLandmarker ARKit extraction → Live2D parameter mapping → .npz output |
+| **Training** | `src/motion/training/` | MotionDataset, train.py, LoRA module. Supports base model training and character-specific LoRA fine-tuning |
+| **Config** | `config/default.yaml` | Unified YAML config with sections: app, live2d, audio, asr, dialogue, tts, motion, perception, training, training.lora, preprocess, performance, logging |
 
 ## Performance Model Architecture
 
@@ -83,6 +86,32 @@ The engine is **always-on**. State transitions are driven by audio presence, not
 - **Facial motion** (MediaPipe Face Mesh when applicable): Fine-grained facial landmark → Live2D parameter mapping.
 
 This mapping runs once during training data preprocessing. At inference time, the Performance Engine directly outputs Live2D parameters.
+
+## Performance Model Architecture Comparison with LPM 1.0
+
+Both Amadeus and MiHoYo's LPM 1.0 use the same causal architecture — **neither has an "intention to listen" mechanism**. Both are purely reactive: microphone audio input → model outputs listening behavior.
+
+| Dimension | LPM 1.0 | Amadeus FullDuplexDiT |
+|---|---|---|
+| Parameters | 17B (Base LPM) | 124M total (24M trainable) |
+| Output space | Video pixels (millions of dims) | Live2D parameters (45 dims) |
+| Training data | Curated human conversation videos (speaking–listening pairs) | None yet |
+| Distillation | DMD → 2-step causal streaming generator | 4-step DDIM |
+| Listen state input | User audio only (no text prompt) | User audio + ASR transcript |
+| Open source | ❌ Not open-sourced, no plans | ✅ MIT License |
+| Key insight | "Listening is a performance" — audio-driven micro-expressions learned from data | Same architecture, same philosophy |
+
+**The "listening feel" is data-driven, not architecture-driven.** LPM's natural listening behavior comes from its training data (real human conversations), not from a special mechanism. Amadeus needs training data to achieve the same effect.
+
+### Silence State Enhancement (Planned)
+
+Current Silence text_prompt comes only from CameraPerception (e.g., "user is watching attentively"). A `SilencePromptGenerator` is planned to enrich this with:
+- Time since last interaction ("user has been silent for 15 seconds")
+- Conversation context ("waiting for user's response to 'How was your day?'")
+- Emotional continuity from previous dialogue turns
+- Randomized micro-behavior suggestions ("slightly tilt head, curious expression")
+
+This would create the illusion of the character "wanting to listen" without changing the reactive architecture.
 
 ## Key Distinctions
 
