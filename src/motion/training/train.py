@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 
 from src.motion.model import FullDuplexDiT
 from src.motion.training.dataset import MotionDataset
+from src.motion.training.ema import EMAModel
 from src.motion.training.lora import apply_lora, save_lora
 
 
@@ -30,6 +31,7 @@ def train(
     weight_decay: float = 0.01,
     warmup_steps: int = 100,
     early_stopping_patience: int = 0,
+    ema_decay: float = 0.0,
     # ── LoRA ──
     use_lora: bool = False,
     lora_rank: int = 8,
@@ -170,6 +172,19 @@ def train(
                 scaler.load_state_dict(_resume_state["scaler"])
             except Exception as e:
                 logger.warning(f"Could not restore scaler state: {e}")
+
+    # L2 fix: optional EMA of trainable parameters. Disabled by default
+    # (ema_decay=0.0). Set to ~0.999 to enable.
+    ema: EMAModel | None = None
+    if ema_decay > 0.0:
+        ema = EMAModel(model, decay=ema_decay)
+        if _resume_state is not None and "ema" in _resume_state:
+            try:
+                ema.load_state_dict(_resume_state["ema"])
+                logger.info("Restored EMA state from checkpoint")
+            except Exception as e:
+                logger.warning(f"Could not restore EMA state: {e}")
+        logger.info(f"EMA enabled (decay={ema_decay})")
     criterion = nn.MSELoss()
     scaler = torch.amp.GradScaler(device) if use_amp and device == "cuda" else None
 
@@ -228,6 +243,9 @@ def train(
                 # optimization steps including warmup), so we must call
                 # step() after each optimizer step, not once per epoch.
                 scheduler.step()
+                # L2: refresh EMA shadow weights after each optimizer step.
+                if ema is not None:
+                    ema.update(model)
                 optimizer.zero_grad()
 
             total_loss += loss.item()
@@ -236,6 +254,9 @@ def train(
         # Validation loss
         val_loss = 0.0
         if val_loader is not None:
+            # L2: when EMA is enabled, validation runs under EMA weights for a
+            # less noisy early-stopping signal and a closer proxy to inference.
+            backup = ema.copy_to(model, store_original=True) if ema is not None else None
             model.eval()
             with torch.no_grad():
                 for batch in val_loader:
@@ -254,6 +275,8 @@ def train(
                         pred = model(audio, tts_audio, visual, prompts, identity, t, noisy)
                         val_loss += criterion(pred, motion).item()
             val_loss /= max(len(val_loader), 1)
+            if backup is not None:
+                ema.restore(model, backup)
             model.train()
 
         log_msg = f"Epoch {epoch + 1}/{num_epochs} | Loss: {avg_loss:.6f} | LR: {scheduler.get_last_lr()[0]:.2e}"
@@ -291,6 +314,7 @@ def train(
                     optimizer=optimizer,
                     scheduler=scheduler,
                     scaler=scaler,
+                    ema=ema,
                     epoch=epoch,
                     config={
                         "num_params": num_params,
@@ -299,6 +323,7 @@ def train(
                         "num_diffusion_steps": num_diffusion_steps,
                         "weight_decay": weight_decay,
                         "warmup_steps": warmup_steps,
+                        "ema_decay": ema_decay,
                     },
                 )
                 logger.info(f"Checkpoint saved: {checkpoint_path}")
@@ -309,6 +334,8 @@ def train(
         save_lora(model, final_lora_path)
         logger.info(f"LoRA adapter saved to {final_lora_path}")
     else:
+        # L2: final model uses EMA weights (better quality).
+        backup = ema.copy_to(model, store_original=True) if ema is not None else None
         checkpoint_path = output_dir / "full_duplex_dit.pt"
         _save_full_checkpoint(
             checkpoint_path,
@@ -316,6 +343,7 @@ def train(
             optimizer=optimizer,
             scheduler=scheduler,
             scaler=scaler,
+            ema=ema,
             epoch=num_epochs,
             config={
                 "num_params": num_params,
@@ -324,8 +352,11 @@ def train(
                 "num_diffusion_steps": num_diffusion_steps,
                 "weight_decay": weight_decay,
                 "warmup_steps": warmup_steps,
+                "ema_decay": ema_decay,
             },
         )
+        if backup is not None:
+            ema.restore(model, backup)
         logger.info(f"Model saved to {checkpoint_path}")
     return model
 
@@ -337,14 +368,16 @@ def _save_full_checkpoint(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler._LRScheduler,
     scaler: torch.amp.GradScaler | None,
+    ema: EMAModel | None = None,
     epoch: int,
     config: dict,
 ) -> None:
     """Persist a complete training snapshot for resume.
 
     Stores the model state, optimizer state (momentum, variance, step),
-    scheduler state, AMP scaler state, the epoch counter, and the training
-    config. Together these are sufficient to exactly resume a run.
+    scheduler state, AMP scaler state, the EMA shadow weights, the epoch
+    counter, and the training config. Together these are sufficient to
+    exactly resume a run.
     """
     payload = {
         "model": model.state_dict(),
@@ -355,6 +388,8 @@ def _save_full_checkpoint(
     }
     if scaler is not None:
         payload["scaler"] = scaler.state_dict()
+    if ema is not None:
+        payload["ema"] = ema.state_dict()
     torch.save(payload, path)
 
 
@@ -386,6 +421,8 @@ if __name__ == "__main__":
                         help="Linear warmup steps before cosine decay (0=disable)")
     parser.add_argument("--early_stopping_patience", type=int, default=0,
                         help="Stop if val loss does not improve for N epochs (0=disable)")
+    parser.add_argument("--ema_decay", type=float, default=0.0,
+                        help="EMA decay for trainable parameters (0=disable, 0.999 typical)")
     parser.add_argument("--use_lora", action="store_true",
                         help="Enable LoRA fine-tuning (freezes base model)")
     parser.add_argument("--lora_rank", type=int, default=8,
@@ -416,6 +453,7 @@ if __name__ == "__main__":
         weight_decay=args.weight_decay,
         warmup_steps=args.warmup_steps,
         early_stopping_patience=args.early_stopping_patience,
+        ema_decay=args.ema_decay,
         use_lora=args.use_lora,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_alpha,
