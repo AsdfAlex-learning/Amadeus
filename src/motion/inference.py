@@ -168,11 +168,19 @@ class DiffusionMotionInference:
             prompts = [self._current_prompt] if self._current_prompt else [""]
 
             B = 1
-            # Hubert-base stride = 320 samples at 16kHz → 50 features/sec
-            # T is derived from audio encoder output length
-            T = 50
-            params = torch.randn(B, T, self.num_params, device=self._device)
+            # Derive T from the audio encoder output length instead of hardcoding
+            # (M3 fix). This keeps inference aligned with variable-length audio.
+            with torch.no_grad():
+                audio_feat = self._model.audio_encoder(user_wav)
+            T = audio_feat.shape[1]
+            x = torch.randn(B, T, self.num_params, device=self._device)
 
+            # X-prediction DDIM sampling.
+            # Model directly predicts x_0 ∈ [0, 1]. Step formula:
+            #   pred_eps = (x_t - sqrt(ᾱ_t) * pred_x0) / sqrt(1 - ᾱ_t)
+            #   x_{t-1}  = sqrt(ᾱ_{t-1}) * pred_x0
+            #             + sqrt(1 - ᾱ_{t-1} - σ²) * pred_eps
+            #             + σ * noise   (η=0 → deterministic)
             timesteps = torch.linspace(
                 999, 0, self.num_inference_steps + 1, device=self._device
             ).long()
@@ -181,20 +189,23 @@ class DiffusionMotionInference:
                 t_next = timesteps[i + 1]
                 t_tensor = t.unsqueeze(0).expand(B)
                 alpha_t = torch.tensor(self._alphas_cumprod[t], device=self._device)
-                pred = self._model(user_wav, tts_wav, vis, prompts, id_tensor, t_tensor, params)
-                beta_t = torch.tensor(self._betas[t], device=self._device)
-                if t_next > 0:
-                    noise = torch.randn_like(params)
-                    sigma_t = torch.sqrt(beta_t)
-                    params = (params - (beta_t / torch.sqrt(1 - alpha_t)) * pred) / torch.sqrt(
-                        1 - beta_t
-                    ) + sigma_t * noise
-                else:
-                    params = (params - (beta_t / torch.sqrt(1 - alpha_t)) * pred) / torch.sqrt(
-                        1 - beta_t
-                    )
+                pred_x0 = self._model(user_wav, tts_wav, vis, prompts, id_tensor, t_tensor, x)
+                sqrt_alpha_t = torch.sqrt(alpha_t)
+                sqrt_one_minus_alpha_t = torch.sqrt(1.0 - alpha_t)
+                pred_eps = (x - sqrt_alpha_t * pred_x0) / sqrt_one_minus_alpha_t
 
-            return params[0].cpu().numpy()
+                alpha_prev = (
+                    torch.tensor(self._alphas_cumprod[t_next], device=self._device)
+                    if t_next > 0
+                    else torch.tensor(1.0, device=self._device)
+                )
+                # η=0 → deterministic DDIM (no stochastic noise injection)
+                sigma_t = torch.tensor(0.0, device=self._device)
+                dir_xt = torch.sqrt((1.0 - alpha_prev - sigma_t ** 2).clamp(min=0.0)) * pred_eps
+                noise = torch.randn_like(x) if t_next > 0 else torch.zeros_like(x)
+                x = torch.sqrt(alpha_prev) * pred_x0 + dir_xt + sigma_t * noise
+
+            return x[0].cpu().numpy()
 
     def _emit_params(self, params_seq: np.ndarray):
         num_frames = params_seq.shape[0]
