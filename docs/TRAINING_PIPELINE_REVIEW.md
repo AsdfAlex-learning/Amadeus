@@ -1,9 +1,33 @@
 # Amadeus 训练与微调 Pipeline 深度审查报告
 
-> **审查日期**: 2026-06-07  
-> **审查范围**: 模型架构 (`model.py`, `inference.py`)、训练循环 (`train.py`)、数据集 (`dataset.py`)、LoRA 微调 (`lora.py`)、预处理管线 (`preprocess/`)、性能参数 (`performance.py`)、推理路径 (`inference.py`)  
-> **审查文件**: 14 个核心文件，~2500 行代码  
-> **项目状态**: Roadmap Phase 7（数据预处理）已完成，Phase 8（模型训练与数据管线验证）待开始
+> **审查日期**: 2026-06-07
+> **审查范围**: 模型架构 (`model.py`, `inference.py`)、训练循环 (`train.py`)、数据集 (`dataset.py`)、LoRA 微调 (`lora.py`)、预处理管线 (`preprocess/`)、性能参数 (`performance.py`)、推理路径 (`inference.py`)
+> **审查文件**: 14 个核心文件，~2500 行代码
+> **项目状态**: Roadmap Phase 7.5（训练管线审计与修复）已完成，Phase 8（首次端到端训练）即将开始
+
+---
+
+## ✅ 修复状态
+
+报告中的 11 个问题已在 `fix/training-pipeline-issues` 分支中以 **10 个原子提交** 全部修复，每个修复可独立回滚。
+
+| ID | 严重性 | 标题 | 提交 | 文件 |
+|----|--------|------|------|------|
+| C1 | 🔴 | Sigmoid + ε-prediction 不兼容 → **x-prediction** | `edccc64` | `train.py` |
+| H1 | 🟠 | DDIM 推理公式错误 → **x-prediction DDIM** | `67005b4` | `inference.py` |
+| C2 | 🔴 | 25→50fps 零填充 → **线性插值** | `fac3d63` | `dataset.py` |
+| H2 | 🟠 | LoRA 推理无加载 → **热加载 + 切换** | `7ec4168` | `inference.py` |
+| M1 | 🟡 | 零视觉帧污染 → **50% 模态 dropout** | `3ceb652` | `model.py` |
+| M2 | 🟡 | weight_decay 未传 → **通过管线** | `2447f33` | `train.py` |
+| M3 | 🟡 | T=50 硬编码 → **从 Hubert 推导** | `67005b4` | `inference.py` |
+| M4 | 🟡 | warmup 未实现 → **per-step linear+cosine** | `8c05ebb` | `train.py` |
+| L2 | 🔵 | 无 EMA → **新 `ema.py` 模块** | `fd09afe` | `ema.py` + `train.py` |
+| L3 | 🔵 | 无早停 → **patience 早停** | `91cdb2b` | `train.py` |
+| L4 | 🔵 | 检查点不完整 → **完整快照** | `91cdb2b` | `train.py` |
+| L5 | 🔵 | legacy 路径错误 → **修复 fps 假设** | `aafade0` | `dataset.py` |
+
+**决策文档**: `docs/adr/0002-x-prediction-and-50hz-alignment.md`
+**视觉化**: 11 张 Mermaid 图见 `docs/ARCHITECTURE_DIAGRAMS.md`
 
 ---
 

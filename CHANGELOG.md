@@ -2,6 +2,94 @@
 
 All notable changes to Amadeus will be documented in this file.
 
+## [Unreleased] - 2026-06-07
+
+### Critical (Training-Blocking) Fixes
+
+After a full review of the training and inference pipeline
+(`docs/TRAINING_PIPELINE_REVIEW.md`, 11 architecture diagrams in
+`docs/ARCHITECTURE_DIAGRAMS.md`), the following issues were identified
+and fixed in the `fix/training-pipeline-issues` branch (10 atomic
+commits, each independently revertible):
+
+- **C1: x-prediction diffusion** — `src/motion/training/train.py`.
+  The output head ends in `nn.Sigmoid()` (range [0, 1]) but the loss
+  was MSE against standard normal noise — mathematically unrepresentable
+  (≈68% of `N(0, 1)` falls outside [0, 1]). The model now predicts the
+  clean sample `x_0` directly. Inference switched to the matching
+  x-prediction DDIM step formula.
+- **H1: x-prediction DDIM inference** — `src/motion/inference.py`.
+  Replaced the custom non-standard DDIM step with the canonical
+  x-prediction formulation
+  `x_{t-1} = √ᾱ_{t-1}·pred_x0 + √(1-ᾱ_{t-1}−σ²)·pred_eps + σ·noise`.
+- **C2: 25→50 fps motion alignment** — `src/motion/training/dataset.py`.
+  The preprocessing pipeline extracts at 25 fps but the model expects
+  50 Hz motion. Previously the dataset zero-padded shorter segments, so
+  every training sample was 50% zeros. Motion (and head_angles) are
+  now linearly resampled to `AUDIO_FEATURES_PER_SEC` (50) using the
+  `fps` field stored in each .npz.
+
+### High Severity Fixes
+
+- **H2: LoRA inference path** — `src/motion/inference.py`. Trained
+  character LoRA adapters were silently ignored at inference. Added a
+  `lora` block to the motion config, automatic adapter load from
+  `models/lora/<character_id>/lora_adapter.pt`, and runtime character
+  swap via `set_character_id()` with `remove_lora` / `apply_lora` /
+  `load_lora` / `merge_lora`.
+
+### Medium Severity Improvements
+
+- **M1: Visual modality dropout** — `src/motion/model.py`. Training
+  data has no real camera frames; the VisualEncoder therefore outputs
+  garbage that pollutes cross-attention. The visual pathway is now
+  randomly zeroed out 50% of the time during training so the model
+  learns to produce motion from audio alone and to use vision when it
+  is actually present at inference.
+- **M2: `weight_decay` plumbed to AdamW** — `src/motion/training/train.py`.
+  The YAML config specified `weight_decay: 0.01` but the optimizer was
+  created with the AdamW default (0.0). The value is now passed
+  through `train()` and the new `--weight_decay` CLI argument.
+- **M3: Dynamic T from audio encoder** — `src/motion/inference.py`.
+  The 4-step DDIM loop previously hardcoded `T = 50`. `T` is now
+  derived from the Hubert encoder's output length, so inference
+  remains correctly aligned for variable-length audio.
+- **M4: Per-step warmup + cosine** — `src/motion/training/train.py`.
+  The config specified `warmup_steps: 100` but it was ignored. The
+  scheduler is now `SequentialLR(LinearLR + CosineAnnealingLR)` over
+  total optimization steps, stepped after every optimizer update.
+
+### Low Severity Improvements
+
+- **L2: EMA of trainable parameters** — new file
+  `src/motion/training/ema.py`; integrated into `train.py`. Self-
+  contained, no third-party dependency. Enabled by `--ema_decay`
+  (0 = disabled, 0.999 typical). EMA weights are used for validation
+  and for the final checkpoint.
+- **L3: Early stopping** — `src/motion/training/train.py`. Stops
+  training when validation loss fails to improve for
+  `--early_stopping_patience` epochs (0 = disabled).
+- **L4: Complete checkpoint snapshots** — `src/motion/training/train.py`.
+  Checkpoints now store model, optimizer, scheduler, AMP scaler, EMA
+  shadow, epoch counter, and training config. The legacy raw-`state_dict`
+  format is still accepted on resume.
+- **L5: Legacy dataset path fix** — `src/motion/training/dataset.py`.
+  The `.wav + .npy` loader indexed the motion array with `chunk_samples`
+  (16 000) frames, which only made sense if motion were recorded
+  sample-by-sample alongside audio. Resample to 50 Hz first, then chunk
+  with `chunk_motion_frames`.
+
+### Documentation
+
+- New: `docs/TRAINING_PIPELINE_REVIEW.md` — full review report covering
+  11 issues, severity table, fix plan.
+- New: `docs/ARCHITECTURE_DIAGRAMS.md` plus `docs/diagrams/*.png` —
+  11 Mermaid diagrams of system data flow, model architecture, training,
+  inference, LoRA, preprocessing, performance, FPS alignment, state
+  machine, and issue impact chain.
+- New: `docs/adr/0002-x-prediction-and-50hz-alignment.md` — ADR
+  documenting the C1 and C2 decisions.
+
 ## [Unreleased] - 2026-05-29
 
 ### Added

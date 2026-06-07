@@ -366,33 +366,59 @@ flowchart TD
 
 ### 4.4 扩散训练
 
-模型训练采用 DDPM 范式：学习预测噪声而非直接回归参数。
+模型采用 **x-prediction** 范式（修复了原 ε-prediction 与 Sigmoid 输出的不兼容问题）：
 
 ```mermaid
 flowchart TD
     subgraph Train["训练循环 每个batch"]
-        T1["取真实动作参数 x₀<br/>49帧×45参"]
+        T1["取真实动作参数 x₀<br/>50帧×45参 ∈ [0,1]"]
         T2["随机采样时步 t ∈ [0,999]"]
         T3["生成噪声 ε ~ N(0,I)"]
         T4["加噪: xₜ = √ᾱₜ·x₀ + √(1-ᾱₜ)·ε"]
-        T5["模型预测: pred = DiT(...)"]
-        T6["损失: L = MSE(pred, ε)"]
+        T5["模型预测: pred_x0 = DiT(...)"]
+        T6["损失: L = MSE(pred_x0, x₀)"]
         T1 --> T2 --> T3 --> T4 --> T5 --> T6
     end
-    
-    subgraph Infer["推理 4步去噪"]
-        I1["t=999: 纯噪声"]
-        I2["t=666: DiT去噪"]
-        I3["t=333: DiT去噪"]
+
+    subgraph Infer["推理 4步x-DDIM"]
+        I1["x_T ~ N(0,I)"]
+        I2["t=999→749: x-pred DDIM"]
+        I3["t=499→249: x-pred DDIM"]
         I4["t=0: 干净参数"]
         I1 --> I2 --> I3 --> I4
     end
-    
+
     style Train fill:#4a90d9,color:white
     style Infer fill:#d94a90,color:white
 ```
 
-### 4.5 硬件兼容性
+**x-prediction 选择理由**：
+- 模型输出经过 Sigmoid 约束在 [0,1]，与 Live2D 参数范围天然对齐
+- ε-prediction 要求模型输出标准正态噪声（值域 ℝ），数学上不可能由 Sigmoid 表示
+- x-prediction 推理公式更简洁：`x_{t-1} = √ᾱ_{t-1}·pred_x0 + √(1-ᾱ_{t-1}−σ²)·pred_eps + σ·noise`
+
+详见 ADR 0002。
+
+### 4.5 时空对齐
+
+音频特征 50Hz（Hubert stride=320 @ 16kHz），运动数据从预处理管线以 25fps 提取。
+数据集在加载时将运动线性重采样到 50Hz，每个 1 秒块产出 50 帧 × 45 参数。
+
+**训练管线保证**（`fix/training-pipeline-issues` 分支）：
+
+- x-prediction 损失函数（不是 ε-prediction）
+- 25→50fps 线性插值（不是零填充）
+- 50% 视觉模态 dropout（训练数据无相机帧）
+- `weight_decay=0.01` 传入 AdamW
+- Per-step linear warmup → cosine 衰减
+- 可选 EMA 权重（默认 0 = 禁用）
+- 完整检查点快照（model + optimizer + scheduler + scaler + EMA + epoch）
+- 早停机制（基于验证损失 patience）
+- 角色 LoRA 在推理时热加载与切换
+
+详见 `docs/TRAINING_PIPELINE_REVIEW.md` 审查报告。
+
+### 4.6 硬件兼容性
 
 | 硬件 | 训练 | 推理 (4步) | 推理 (8步) |
 |---|---|---|---|
@@ -400,7 +426,7 @@ flowchart TD
 | **RTX 4060 8G** | ✅ CUDA fp16, ~3GB | ✅ GPU, <1s/chunk | ✅ GPU |
 | **R7 8854HS CPU** | ✅ fp32, ~4GB | ✅ CPU fp16, ~3-5s/chunk | ⚠ 较慢 |
 
-### 4.6 离线缓存
+### 4.7 离线缓存
 
 所有编码器权重支持离线缓存，避免首次启动时的长时间下载：
 
@@ -556,14 +582,22 @@ flowchart LR
 - [x] CI/CD (ruff lint + basedpyright type check)
 - [x] 文档 (README, ARCHITECTURE, CONTRIBUTING, CHANGELOG, PROJECT)
 - [x] Windows 设置脚本 (`scripts/setup_windows.ps1`)
+- [x] **训练管线审计与修复** (10 个原子提交，独立可回滚):
+  - x-prediction 扩散 (C1) + 推理 DDIM 重写 (H1)
+  - 25→50fps 线性插值 (C2)
+  - LoRA 推理加载路径 (H2)
+  - 视觉模态 dropout (M1)、weight_decay 修复 (M2)、动态 T (M3)、warmup+cosine (M4)
+  - EMA 权重 (L2)、早停 (L3)、完整检查点 (L4)、legacy 路径修复 (L5)
+  - 详见 `docs/TRAINING_PIPELINE_REVIEW.md` + `docs/ARCHITECTURE_DIAGRAMS.md` + `docs/adr/0002-*`
 
 ### 计划中
 
 - [ ] **Phase 8**: 模型训练与数据
   - FullDuplexDiT 在训练数据上训练（需 CUDA torch + 模型权重下载）
-  - 端到端预处理管线验证（样本视频 → .npz）
-  - LoRA 微调验证（apply → train → save → load 周期）
+  - 端到端预处理管线验证（样本视频 → .npz → 50Hz 对齐）
+  - LoRA 微调验证（apply → train → save → 推理热加载 全链路）
   - 训练配置与超参调优
+  - 训练数据规模评估（MEAD/BIWI/VOCASET/动漫素材）
 - [ ] **Phase 9**: 记忆系统集成 (LLMChatFlow)
   - 向量数据库长期记忆
   - 跨会话人格持久化
@@ -656,8 +690,12 @@ Amadeus/
 │   └── default.yaml             # 全局默认配置 (training/lora/preprocess/performance)
 ├── docs/
 │   ├── ARCHITECTURE.md          # 架构详解
+│   ├── ARCHITECTURE_DIAGRAMS.md # 11 张 Mermaid 架构图 (含 PNG 渲染)
+│   ├── TRAINING_PIPELINE_REVIEW.md  # 训练与推理管线审查报告
+│   ├── diagrams/                # Mermaid 渲染的 PNG 图表
 │   └── adr/
-│       └── 0001-base-model-lora-architecture.md  # ADR: Base Model + LoRA
+│       ├── 0001-base-model-lora-architecture.md
+│       └── 0002-x-prediction-and-50hz-alignment.md
 ├── src/
 │   ├── main.py                  # 应用入口
 │   ├── config.py                # 配置加载器 + 类型化访问器
@@ -675,8 +713,8 @@ Amadeus/
 │   │   ├── persona.py           # 人设管理
 │   │   └── context.py           # 上下文窗口 + 摘要
 │   ├── motion/
-│   │   ├── model.py             # FullDuplexDiT (432行)
-│   │   ├── inference.py         # 扩散推理管线 (T=50, 4-step DDIM)
+│   │   ├── model.py             # FullDuplexDiT (432行, x-prediction + 视觉 dropout)
+│   │   ├── inference.py         # 扩散推理管线 (4-step x-DDIM, 动态 T, LoRA 热加载)
 │   │   ├── performance.py       # PerformanceEngine (6 persona params)
 │   │   ├── __init__.py          # 导出 PerformanceConfig + PerformanceEngine
 │   │   ├── preprocess/
@@ -688,9 +726,10 @@ Amadeus/
 │   │   │   └── mappings/
 │   │   │       └── default.yaml     # 45参数映射配置
 │   │   └── training/
-│   │       ├── dataset.py       # MotionDataset (多模态dict, 50Hz对齐)
-│   │       ├── train.py         # 训练脚本 (LoRA集成, val split, resume)
+│   │       ├── dataset.py       # MotionDataset (多模态dict, 50Hz对齐, fps重采样)
+│   │       ├── train.py         # 训练脚本 (x-pred, LoRA, EMA, 早停, 完整快照, resume)
 │   │       ├── lora.py          # LoRA模块 (495行, 完整生命周期API)
+│   │       ├── ema.py           # EMA 权重 (无第三方依赖)
 │   │       └── __init__.py      # 导出 MotionDataset + LoRA classes
 │   ├── tts/
 │   │   └── engine.py            # TTS 引擎

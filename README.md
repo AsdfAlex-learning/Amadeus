@@ -28,10 +28,14 @@ Amadeus is a desktop application that combines a customizable Live2D character w
 - **Live2D Avatar**: Character rendering with live2d-py + PySide6/OpenGL
 - **FullDuplexDiT Motion Model**: Multimodal diffusion transformer (Hubert + DiT + CNN, 124M/24M params)
   - Three states: Listen (user audio), Speak (TTS audio), Silence (camera context)
-  - 4-step DDIM inference at 50Hz parameter output
+  - **x-prediction diffusion** (model outputs `x_0` directly, naturally compatible with the `[0, 1]` Live2D parameter range)
+  - 4-step x-prediction DDIM inference at 50Hz parameter output
+  - 50% visual modality dropout during training so the model learns to ignore the absent camera stream
 - **Character LoRA**: Low-rank fine-tuning (~MB per character) for character-specific motion style
+  - **Hot-swappable at inference** — `set_character_id()` removes the previous adapter and applies the new one in place
 - **Persona Performance Parameters**: Gesture scale, react speed, expressiveness, and more — configurable per persona
 - **Video → Training Data Pipeline**: MediaPipe FaceLandmarker + ARKit → Live2D parameter mapping
+  - Linear resampling to 50 Hz at load time, regardless of the original extraction fps
 - **Camera Perception**: FaceMesh face detection, gaze estimation, expression analysis
 - **Pluggable Characters**: Framework-first design — swap Live2D models and personas
 - **Full Local**: All models run locally on consumer hardware (M2 / RTX 4060)
@@ -74,15 +78,19 @@ python -m src.main
 ### Training the Motion Model
 
 ```bash
-# Prepare data via preprocessing pipeline
+# Prepare data via preprocessing pipeline (any fps — dataset will resample to 50 Hz)
 python -m src.motion.preprocess.pipeline --input video.mp4 --output data/preprocessed/
 
-# Train base model
+# Train base model (x-prediction diffusion)
 python -m src.motion.training.train \
     --data_dir data/preprocessed \
     --output_dir models/motion \
     --num_params 45 \
-    --epochs 100
+    --epochs 100 \
+    --weight_decay 0.01 \
+    --warmup_steps 100 \
+    --ema_decay 0.999 \
+    --early_stopping_patience 20
 
 # LoRA fine-tuning for a specific character
 python -m src.motion.training.train \
@@ -90,7 +98,28 @@ python -m src.motion.training.train \
     --output_dir models/lora/kurisu \
     --use_lora --lora_rank 8 --lora_alpha 16 \
     --epochs 50
+
+# Resume training from a full snapshot (restores optimizer + scheduler + EMA + epoch)
+python -m src.motion.training.train \
+    --data_dir data/preprocessed \
+    --output_dir models/motion \
+    --resume models/motion/full_duplex_dit_epoch_0050.pt
 ```
+
+**Training pipeline guarantees** (after the v0.2 fixes documented in
+`docs/TRAINING_PIPELINE_REVIEW.md`):
+
+- **x-prediction** — the model output's Sigmoid is preserved and the
+  loss target is the clean motion signal (in [0, 1]).
+- **fps-correct alignment** — every chunk contains 50 motion frames,
+  no zero-padding.
+- **EMA weights** (when `--ema_decay > 0`) drive validation and the
+  final checkpoint.
+- **Full-snapshot checkpoints** — model, optimizer, scheduler, AMP
+  scaler, EMA shadow, epoch, and config are all persisted; resume is
+  lossless.
+- **Character LoRA is hot-swappable** at inference via
+  `DiffusionMotionInference.set_character_id()`.
 
 ## Project Structure
 
@@ -124,9 +153,10 @@ Amadeus/
 │   │   │   ├── pipeline.py          # End-to-end preprocessing orchestrator
 │   │   │   └── mappings/default.yaml  # 45-parameter mapping config
 │   │   └── training/
-│   │       ├── dataset.py       # MotionDataset (multimodal dict, 50Hz alignment)
-│   │       ├── train.py         # Training script (LoRA integration, val split, resume)
-│   │       └── lora.py          # LoRA module (495 lines, full lifecycle API)
+│   │       ├── dataset.py       # MotionDataset (multimodal dict, 50Hz alignment, fps resample)
+│   │       ├── train.py         # Training script (x-prediction, LoRA, EMA, val split, full checkpoint, early stop)
+│   │       ├── lora.py          # LoRA module (495 lines, full lifecycle API)
+│   │       └── ema.py           # EMA of trainable parameters (no third-party deps)
 │   ├── tts/
 │   │   └── engine.py            # TTS engine (multi-backend)
 │   └── perception/
@@ -135,7 +165,11 @@ Amadeus/
 │   └── default.yaml             # Default configuration (app/live2d/audio/asr/dialogue/tts/motion/perception/training/lora/preprocess/performance)
 ├── docs/
 │   ├── ARCHITECTURE.md          # Detailed architecture documentation
-│   └── adr/0001-base-model-lora-architecture.md  # ADR: Base Model + LoRA
+│   ├── ARCHITECTURE_DIAGRAMS.md # 11 Mermaid diagrams + PNGs
+│   ├── TRAINING_PIPELINE_REVIEW.md  # Full training & inference review report
+│   └── adr/
+│       ├── 0001-base-model-lora-architecture.md
+│       └── 0002-x-prediction-and-50hz-alignment.md
 ├── scripts/
 │   ├── download_models.py       # Download encoder weights (Hubert+MobileNet+BERT)
 │   └── setup_windows.ps1        # Windows 11 environment setup
@@ -173,9 +207,12 @@ Our Mini-LPM adapts this concept to operate in **Live2D parameter space** instea
 | Architecture | Hubert encoder + 4-layer Interlaced DiT (Listen/Speak) + CNN decoder |
 | Total Params | 124M (94M frozen Hubert + 24M trainable DiT + CNN) |
 | Input | 5-stream multimodal: user audio, TTS audio, camera frames, text prompt, character ID |
-| Output | 50 frames × 45 Live2D parameters |
+| Output | 50 frames × 45 Live2D parameters (per second of audio) |
+| Diffusion formulation | **x-prediction** (model predicts `x_0` ∈ [0, 1] via Sigmoid) |
+| Loss | MSE between `pred_x0` and ground-truth motion |
 | LoRA Params | ~500K per character (rank=8), ~MB per character |
-| Inference | 4-step DDIM, real-time at 50Hz |
+| Inference | 4-step x-prediction DDIM, real-time at 50 Hz |
+| Optional training features | EMA weights (`--ema_decay`), full-snapshot checkpoints, early stopping, warmup + cosine LR, weight decay |
 | Reference | NVIDIA Audio2Face-3D v2.3 (40M, real-time) |
 
 ### Dialogue Model
@@ -226,7 +263,12 @@ pytest tests/
 - [x] Phase 5: TTS engine (multi-backend)
 - [x] Phase 6: Camera perception (face + gaze + expression)
 - [x] Phase 7: Data preprocessing (video → facial landmarks → Live2D parameters)
-- [ ] Phase 8: Model training & data pipeline validation
+- [x] **Phase 7.5: Training pipeline audit & fixes** (branch `fix/training-pipeline-issues`)
+  - 10 atomic commits: x-prediction, fps alignment, DDIM rewrite, LoRA
+    inference path, visual dropout, weight decay, warmup, EMA, full
+    checkpoints, legacy path fix
+  - See `docs/TRAINING_PIPELINE_REVIEW.md` and `docs/adr/0002-*.md`
+- [ ] Phase 8: First end-to-end training run on real character data
 - [ ] Phase 9: Memory system integration (LLMChatFlow)
 - [ ] Phase 10: Multi-character support & live swapping
 

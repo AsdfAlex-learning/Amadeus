@@ -139,11 +139,12 @@ User Audio (16kHz, 1sec)     TTS Audio (16kHz, 1sec)     Camera Frames (5×224×
 - `body_skeleton.py`: YOLOv8-pose stub (deferred from MVP)
 
 **Training** (`training/`):
-- `dataset.py`: `MotionDataset` — multimodal dict format, 50Hz alignment, .npz + legacy .npy/.wav support
-- `train.py`: DDPM training loop with val split, epoch checkpointing, resume, `--dataset_type`, and full LoRA integration (`--use_lora`, `--lora_rank`, `--lora_alpha`)
+- `dataset.py`: `MotionDataset` — multimodal dict format, 50Hz alignment, fps resampling (linear interp to 50Hz regardless of source fps), .npz + legacy .npy/.wav support
+- `train.py`: **x-prediction** training loop. Features: val split, **full-snapshot checkpointing** (model + optimizer + scheduler + AMP scaler + EMA + epoch), resume (lossless from full snapshots, legacy raw-state_dict supported), `--dataset_type`, and full LoRA integration (`--use_lora`, `--lora_rank`, `--lora_alpha`). New flags: `--weight_decay`, `--warmup_steps`, `--ema_decay`, `--early_stopping_patience`.
 - `lora.py`: LoRA training module — `LoRALinear` / `LoRAConv1d` wrappers, `apply/remove/merge/save/load_lora` lifecycle API, monkey-patching approach (no model.py modification)
+- `ema.py`: Self-contained EMA of trainable parameters. No third-party dependency. Used for validation loss and final checkpoint save when `--ema_decay > 0`.
 
-**Inference** (`inference.py`): Streaming diffusion inference with overlap-add. Maintains audio/visual buffers, processes chunks of `chunk_size` seconds via 4-step DDIM, emits parameter dictionaries frame-by-frame to callbacks. T=50 frames per second of audio (aligned with Hubert stride).
+**Inference** (`inference.py`): Streaming x-prediction diffusion inference with overlap-add. Maintains audio/visual/tts buffers, processes chunks of `chunk_size` seconds via **4-step x-prediction DDIM** (η=0 deterministic), emits parameter dictionaries frame-by-frame to callbacks. **T is dynamically derived from the Hubert encoder output length** (was previously hardcoded to 50). Loads and **hot-swaps character LoRA adapters** via `set_character_id()` — looks up `models/lora/<id>/lora_adapter.pt` and merges in place.
 
 ### 6. TTS (`src/tts/`)
 
