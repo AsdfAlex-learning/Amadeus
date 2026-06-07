@@ -29,6 +29,7 @@ def train(
     resume_from: str | None = None,
     weight_decay: float = 0.01,
     warmup_steps: int = 100,
+    early_stopping_patience: int = 0,
     # ── LoRA ──
     use_lora: bool = False,
     lora_rank: int = 8,
@@ -80,12 +81,31 @@ def train(
     if resume_from is not None:
         resume_path = Path(resume_from)
         if resume_path.exists():
-            state = torch.load(resume_path, map_location=device)
-            model.load_state_dict(state)
-            start_epoch = int(resume_path.stem.split("_")[-1]) + 1
-            logger.info(f"Resumed from {resume_path} (epoch {start_epoch})")
+            state = torch.load(resume_path, map_location=device, weights_only=False)
+            # L4 fix: support both legacy (raw state_dict) and new format
+            # (dict with model / optimizer / scheduler / epoch).
+            if isinstance(state, dict) and "model" in state:
+                model.load_state_dict(state["model"])
+                start_epoch = int(state.get("epoch", 0)) + 1
+                logger.info(
+                    f"Resumed full state from {resume_path} (epoch {start_epoch})"
+                )
+                # Optimizer and scheduler are restored after they are created.
+                _resume_state = state
+            else:
+                model.load_state_dict(state)
+                # Legacy: epoch derived from filename suffix.
+                try:
+                    start_epoch = int(resume_path.stem.split("_")[-1]) + 1
+                except ValueError:
+                    start_epoch = 0
+                logger.info(
+                    f"Resumed legacy weights from {resume_path} (epoch {start_epoch})"
+                )
+                _resume_state = None
         else:
             logger.warning(f"Resume checkpoint not found: {resume_path}")
+            _resume_state = None
 
     # ── LoRA application ──
     if use_lora:
@@ -131,10 +151,32 @@ def train(
     scheduler = torch.optim.lr_scheduler.SequentialLR(
         optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
     )
+
+    # L4 fix: restore optimizer / scheduler / scaler state if resuming from a
+    # full snapshot. Must run AFTER these objects are constructed.
+    if _resume_state is not None:
+        if "optimizer" in _resume_state:
+            try:
+                optimizer.load_state_dict(_resume_state["optimizer"])
+            except Exception as e:
+                logger.warning(f"Could not restore optimizer state: {e}")
+        if "scheduler" in _resume_state:
+            try:
+                scheduler.load_state_dict(_resume_state["scheduler"])
+            except Exception as e:
+                logger.warning(f"Could not restore scheduler state: {e}")
+        if scaler is not None and "scaler" in _resume_state:
+            try:
+                scaler.load_state_dict(_resume_state["scaler"])
+            except Exception as e:
+                logger.warning(f"Could not restore scaler state: {e}")
     criterion = nn.MSELoss()
     scaler = torch.amp.GradScaler(device) if use_amp and device == "cuda" else None
 
     model.train()
+    # L3 fix: track best validation loss for early stopping.
+    best_val_loss = float("inf")
+    patience_counter = 0
     for epoch in range(start_epoch, num_epochs):
         total_loss = 0.0
         optimizer.zero_grad()
@@ -219,6 +261,20 @@ def train(
             log_msg += f" | Val: {val_loss:.6f}"
         logger.info(log_msg)
 
+        # L3: early stopping based on validation loss.
+        if val_loader is not None and early_stopping_patience > 0:
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= early_stopping_patience:
+                    logger.info(
+                        f"Early stopping at epoch {epoch + 1}: "
+                        f"val loss did not improve for {early_stopping_patience} epochs"
+                    )
+                    break
+
         # Save checkpoint every N epochs
         if (epoch + 1) % 10 == 0:
             if use_lora:
@@ -227,7 +283,24 @@ def train(
                 logger.info(f"LoRA checkpoint saved: {lora_ckpt_path}")
             else:
                 checkpoint_path = output_dir / f"full_duplex_dit_epoch_{epoch + 1:04d}.pt"
-                torch.save(model.state_dict(), checkpoint_path)
+                # L4 fix: include optimizer / scheduler / scaler / epoch so the
+                # run can be fully resumed.
+                _save_full_checkpoint(
+                    checkpoint_path,
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    scaler=scaler,
+                    epoch=epoch,
+                    config={
+                        "num_params": num_params,
+                        "hidden_dim": hidden_dim,
+                        "num_layers": num_layers,
+                        "num_diffusion_steps": num_diffusion_steps,
+                        "weight_decay": weight_decay,
+                        "warmup_steps": warmup_steps,
+                    },
+                )
                 logger.info(f"Checkpoint saved: {checkpoint_path}")
 
     # Final save
@@ -237,9 +310,52 @@ def train(
         logger.info(f"LoRA adapter saved to {final_lora_path}")
     else:
         checkpoint_path = output_dir / "full_duplex_dit.pt"
-        torch.save(model.state_dict(), checkpoint_path)
+        _save_full_checkpoint(
+            checkpoint_path,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            epoch=num_epochs,
+            config={
+                "num_params": num_params,
+                "hidden_dim": hidden_dim,
+                "num_layers": num_layers,
+                "num_diffusion_steps": num_diffusion_steps,
+                "weight_decay": weight_decay,
+                "warmup_steps": warmup_steps,
+            },
+        )
         logger.info(f"Model saved to {checkpoint_path}")
     return model
+
+
+def _save_full_checkpoint(
+    path: Path,
+    *,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
+    scaler: torch.amp.GradScaler | None,
+    epoch: int,
+    config: dict,
+) -> None:
+    """Persist a complete training snapshot for resume.
+
+    Stores the model state, optimizer state (momentum, variance, step),
+    scheduler state, AMP scaler state, the epoch counter, and the training
+    config. Together these are sufficient to exactly resume a run.
+    """
+    payload = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "epoch": epoch,
+        "config": config,
+    }
+    if scaler is not None:
+        payload["scaler"] = scaler.state_dict()
+    torch.save(payload, path)
 
 
 if __name__ == "__main__":
@@ -268,6 +384,8 @@ if __name__ == "__main__":
                         help="Weight decay (L2 regularization) for AdamW")
     parser.add_argument("--warmup_steps", type=int, default=100,
                         help="Linear warmup steps before cosine decay (0=disable)")
+    parser.add_argument("--early_stopping_patience", type=int, default=0,
+                        help="Stop if val loss does not improve for N epochs (0=disable)")
     parser.add_argument("--use_lora", action="store_true",
                         help="Enable LoRA fine-tuning (freezes base model)")
     parser.add_argument("--lora_rank", type=int, default=8,
@@ -297,6 +415,7 @@ if __name__ == "__main__":
         resume_from=args.resume,
         weight_decay=args.weight_decay,
         warmup_steps=args.warmup_steps,
+        early_stopping_patience=args.early_stopping_patience,
         use_lora=args.use_lora,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_alpha,
