@@ -27,6 +27,7 @@ def train(
     dataset_type: str = "preprocessed",
     val_split: float = 0.1,
     resume_from: str | None = None,
+    weight_decay: float = 0.01,
     # ── LoRA ──
     use_lora: bool = False,
     lora_rank: int = 8,
@@ -113,7 +114,7 @@ def train(
         trainable_params = [p for p in model.parameters() if p.requires_grad]
     else:
         trainable_params = model.parameters()
-    optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate)
+    optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
     criterion = nn.MSELoss()
     scaler = torch.amp.GradScaler(device) if use_amp and device == "cuda" else None
@@ -246,6 +247,8 @@ if __name__ == "__main__":
                         help="Validation split ratio (0=no validation)")
     parser.add_argument("--resume", type=str, default=None,
                         help="Resume from checkpoint path")
+    parser.add_argument("--weight_decay", type=float, default=0.01,
+                        help="Weight decay (L2 regularization) for AdamW")
     parser.add_argument("--use_lora", action="store_true",
                         help="Enable LoRA fine-tuning (freezes base model)")
     parser.add_argument("--lora_rank", type=int, default=8,
@@ -273,6 +276,7 @@ if __name__ == "__main__":
         dataset_type=args.dataset_type,
         val_split=args.val_split,
         resume_from=args.resume,
+        weight_decay=args.weight_decay,
         use_lora=args.use_lora,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_alpha,
