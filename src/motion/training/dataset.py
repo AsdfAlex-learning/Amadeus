@@ -108,6 +108,19 @@ class MotionDataset(Dataset):
         live2d_params = data["live2d_params"]  # (T, 45)
         head_angles = data.get("head_angles", np.zeros((live2d_params.shape[0], 3), dtype=np.float32))
         identity_id = int(data.get("identity_id", 0))
+        # C2 fix: the preprocessing pipeline extracts frames at a configurable
+        # fps (default 25). The model, however, operates at 50Hz (aligned with
+        # Hubert's stride). Upsample motion/head_angles to 50Hz so audio and
+        # motion share the same temporal axis. Down-stream chunk math then
+        # operates on the upsampled arrays.
+        source_fps = float(data.get("fps", 25.0))
+        if source_fps != float(self.AUDIO_FEATURES_PER_SEC):
+            live2d_params = self._resample_motion(
+                live2d_params, source_fps, float(self.AUDIO_FEATURES_PER_SEC)
+            )
+            head_angles = self._resample_motion(
+                head_angles, source_fps, float(self.AUDIO_FEATURES_PER_SEC)
+            )
         audio = self._load_audio(sample["audio_path"])
 
         T_motion = live2d_params.shape[0]
@@ -172,6 +185,24 @@ class MotionDataset(Dataset):
             "motion": torch.from_numpy(motion_chunk).float(),
             "head_angles": torch.zeros(motion_chunk.shape[0], 3, dtype=torch.float32),
         }
+
+    @staticmethod
+    def _resample_motion(arr: np.ndarray, src_fps: float, dst_fps: float) -> np.ndarray:
+        """Linearly resample a (T, D) array from src_fps to dst_fps.
+
+        Used to align preprocessing-time fps (typically 25) with the model's
+        50Hz motion rate. Requires T ≥ 2 (single-frame inputs are returned as-is).
+        """
+        if arr.shape[0] < 2 or src_fps == dst_fps:
+            return arr
+        ratio = dst_fps / src_fps
+        new_len = max(1, int(round(arr.shape[0] * ratio)))
+        t_in = np.linspace(0.0, 1.0, num=arr.shape[0], dtype=np.float32)
+        t_out = np.linspace(0.0, 1.0, num=new_len, dtype=np.float32)
+        out = np.empty((new_len, arr.shape[1]), dtype=np.float32)
+        for d in range(arr.shape[1]):
+            out[:, d] = np.interp(t_out, t_in, arr[:, d].astype(np.float32))
+        return out
 
     def _load_audio(self, path: Path) -> np.ndarray:
         try:
