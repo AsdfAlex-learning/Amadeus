@@ -21,6 +21,18 @@ class DiffusionMotionInference:
         self.diffusion_beta_end = float(motion_cfg.get("diffusion_beta_end", 0.02))
         self.identity_vocab_size = int(motion_cfg.get("identity_vocab_size", 16))
 
+        # H2 fix: character lora directory (per-character adapter files).
+        # When set, set_character_id() loads models/lora/<character_id>/lora_adapter.pt
+        # after the base model is loaded. The default is "lora" under model_path.
+        lora_cfg = motion_cfg.get("lora", {}) or {}
+        self.lora_root = Path(
+            lora_cfg.get("root", self.model_path / "lora")
+        )
+        self.lora_default_rank = int(lora_cfg.get("rank", 8))
+        self.lora_default_alpha = float(lora_cfg.get("alpha", 16.0))
+        self.lora_merge_on_load = bool(lora_cfg.get("merge_on_load", True))
+        self._current_lora_id: int | None = None
+
         self._model: FullDuplexDiT | None = None
         self._device = torch.device("cpu")
         self._use_fp16 = bool(motion_cfg.get("use_fp16", True))
@@ -66,8 +78,13 @@ class DiffusionMotionInference:
             )
             checkpoint_path = self.model_path / "full_duplex_dit.pt"
             if checkpoint_path.exists():
-                state = torch.load(checkpoint_path, map_location=self._device)
-                self._model.load_state_dict(state)
+                # Support both the new full snapshot format (L4) and the legacy
+                # raw state_dict. The full snapshot stores weights under "model".
+                state = torch.load(checkpoint_path, map_location=self._device, weights_only=False)
+                if isinstance(state, dict) and "model" in state:
+                    self._model.load_state_dict(state["model"])
+                else:
+                    self._model.load_state_dict(state)
                 logger.info(f"Loaded Full-Duplex DiT from {checkpoint_path}")
             else:
                 logger.warning(f"No checkpoint at {checkpoint_path}, using random weights")
@@ -76,11 +93,82 @@ class DiffusionMotionInference:
                 self._model = self._model.to_half()
             self._model.eval()
             self._model.warmup(self._device)
+
+            # H2 fix: if the current character has a LoRA adapter on disk,
+            # apply it after the base model is loaded. The character_id was
+            # set via set_character_id() before load_model() was called.
+            if self._current_lora_id is not None:
+                self._load_lora_for(self._current_lora_id)
+
             self._loaded = True
             return True
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             return False
+
+    def _load_lora_for(self, character_id: int) -> None:
+        """Apply the LoRA adapter for the given character onto the loaded model.
+
+        Idempotent: if a different LoRA was previously applied, it is removed
+        first so the base weights are restored before the new adapter is
+        loaded. Files looked up:
+            <lora_root>/<character_id>/lora_adapter.pt
+            <lora_root>/<character_id>/lora_config.pt
+        """
+        if self._model is None:
+            logger.warning("Cannot load LoRA: base model not loaded yet")
+            return
+
+        # Restore the base weights if a previous LoRA is still attached.
+        if self._current_lora_id is not None and self._current_lora_id != character_id:
+            try:
+                from src.motion.training.lora import remove_lora
+                remove_lora(self._model)
+            except Exception as e:
+                logger.warning(f"Could not remove previous LoRA: {e}")
+
+        adapter_path = self.lora_root / str(character_id) / "lora_adapter.pt"
+        if not adapter_path.exists():
+            logger.info(
+                f"No LoRA adapter at {adapter_path} — using base model for character {character_id}"
+            )
+            self._current_lora_id = character_id
+            return
+
+        # Load LoRA config if available; otherwise use defaults.
+        from src.motion.training.lora import apply_lora, load_lora, merge_lora
+
+        config_path = self.lora_root / str(character_id) / "lora_config.pt"
+        lora_config: dict = {
+            "lora_rank": self.lora_default_rank,
+            "lora_alpha": self.lora_default_alpha,
+        }
+        if config_path.exists():
+            try:
+                saved_cfg = torch.load(config_path, map_location="cpu", weights_only=False)
+                if isinstance(saved_cfg, dict):
+                    lora_config.update(
+                        {
+                            k: v
+                            for k, v in saved_cfg.items()
+                            if k in ("lora_rank", "lora_alpha", "lora_dropout", "target_modules")
+                        }
+                    )
+            except Exception as e:
+                logger.warning(f"Could not read LoRA config {config_path}: {e}")
+
+        try:
+            apply_lora(self._model, lora_config)
+            load_lora(self._model, adapter_path)
+            if self.lora_merge_on_load:
+                merge_lora(self._model)
+                logger.info(
+                    f"LoRA merged into base weights for character {character_id}"
+                )
+            self._current_lora_id = character_id
+        except Exception as e:
+            logger.error(f"Failed to load LoRA for character {character_id}: {e}")
+            self._current_lora_id = character_id
 
     def on_params(self, callback: Callable[[dict[str, float]], None]):
         self._param_callbacks.append(callback)
@@ -89,7 +177,18 @@ class DiffusionMotionInference:
         self._current_prompt = prompt
 
     def set_character_id(self, char_id: int):
+        """Set the active character and hot-swap LoRA adapters when possible.
+
+        Called both before load_model() (initial selection) and at runtime
+        (character swap). If the model is already loaded we attempt to swap
+        the LoRA in place; otherwise the choice is remembered and applied
+        when load_model() runs.
+        """
+        if self._character_id == char_id:
+            return
         self._character_id = char_id
+        if self._loaded and self._model is not None:
+            self._load_lora_for(char_id)
 
     def process_user_audio(self, audio: np.ndarray):
         if not self._loaded or self._model is None:
