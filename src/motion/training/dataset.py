@@ -164,15 +164,38 @@ class MotionDataset(Dataset):
     def _get_legacy_item(self, sample: dict) -> dict[str, torch.Tensor]:
         audio = self._load_audio(sample["audio_path"])
         motion = np.load(str(sample["motion_path"])).astype(np.float32)
+        # L5 fix: legacy .npy files store motion as (samples, 45) aligned
+        # sample-by-sample with the audio waveform. The previous code indexed
+        # the motion array with `chunk_samples` (16 000) frames, which is
+        # nonsense for motion that lives at 25–50 Hz. Resample motion to
+        # the model's 50 Hz rate first, then chunk normally.
+        if motion.ndim == 2 and motion.shape[0] > len(audio):
+            motion = self._resample_motion(
+                motion, src_fps=self.sample_rate, dst_fps=float(self.AUDIO_FEATURES_PER_SEC)
+            )
         min_len = min(len(audio), len(motion))
         audio = audio[:min_len]
         motion = motion[:min_len]
-        start = np.random.randint(0, max(1, min_len - self.chunk_samples))
-        audio_chunk = audio[start:start + self.chunk_samples]
-        motion_chunk = motion[start:start + self.chunk_samples]
+        T_audio_chunks = len(audio) // self.chunk_samples
+        T_motion_chunks = len(motion) // self.chunk_motion_frames
+        max_chunks = min(T_audio_chunks, T_motion_chunks)
+        if max_chunks == 0:
+            audio_chunk = np.zeros(self.chunk_samples, dtype=np.float32)
+            motion_chunk = np.zeros(
+                (self.chunk_motion_frames, self.num_live2d_params), dtype=np.float32
+            )
+        else:
+            start_chunk = np.random.randint(0, max(1, max_chunks))
+            audio_start = start_chunk * self.chunk_samples
+            motion_start = start_chunk * self.chunk_motion_frames
+            audio_chunk = audio[audio_start:audio_start + self.chunk_samples]
+            motion_chunk = motion[motion_start:motion_start + self.chunk_motion_frames]
+
         if len(audio_chunk) < self.chunk_samples:
             audio_chunk = np.pad(audio_chunk, (0, self.chunk_samples - len(audio_chunk)))
-            motion_chunk = np.pad(motion_chunk, ((0, self.chunk_samples - len(motion_chunk)), (0, 0)))
+        if len(motion_chunk) < self.chunk_motion_frames:
+            pad_len = self.chunk_motion_frames - len(motion_chunk)
+            motion_chunk = np.pad(motion_chunk, ((0, pad_len), (0, 0)))
 
         return {
             "user_audio": torch.from_numpy(audio_chunk).float(),
