@@ -28,6 +28,7 @@ def train(
     val_split: float = 0.1,
     resume_from: str | None = None,
     weight_decay: float = 0.01,
+    warmup_steps: int = 100,
     # ── LoRA ──
     use_lora: bool = False,
     lora_rank: int = 8,
@@ -115,7 +116,21 @@ def train(
     else:
         trainable_params = model.parameters()
     optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+    # M4 fix: config specified warmup_steps but it was ignored. Build a
+    # sequential scheduler that linearly warms up over `warmup_steps`, then
+    # cosine-anneals over the remaining epochs.
+    steps_per_epoch = max(1, len(dataloader) // max(grad_accum_steps, 1))
+    total_steps = max(1, num_epochs * steps_per_epoch)
+    warmup_steps = min(warmup_steps, max(1, total_steps - 1))
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
+    )
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(1, total_steps - warmup_steps)
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
+    )
     criterion = nn.MSELoss()
     scaler = torch.amp.GradScaler(device) if use_amp and device == "cuda" else None
 
@@ -167,11 +182,13 @@ def train(
                     scaler.update()
                 else:
                     optimizer.step()
+                # M4 fix: scheduler is now per-step (SequentialLR over total
+                # optimization steps including warmup), so we must call
+                # step() after each optimizer step, not once per epoch.
+                scheduler.step()
                 optimizer.zero_grad()
 
             total_loss += loss.item()
-
-        scheduler.step()
         avg_loss = total_loss / max(len(dataloader), 1)
 
         # Validation loss
@@ -249,6 +266,8 @@ if __name__ == "__main__":
                         help="Resume from checkpoint path")
     parser.add_argument("--weight_decay", type=float, default=0.01,
                         help="Weight decay (L2 regularization) for AdamW")
+    parser.add_argument("--warmup_steps", type=int, default=100,
+                        help="Linear warmup steps before cosine decay (0=disable)")
     parser.add_argument("--use_lora", action="store_true",
                         help="Enable LoRA fine-tuning (freezes base model)")
     parser.add_argument("--lora_rank", type=int, default=8,
@@ -277,6 +296,7 @@ if __name__ == "__main__":
         val_split=args.val_split,
         resume_from=args.resume,
         weight_decay=args.weight_decay,
+        warmup_steps=args.warmup_steps,
         use_lora=args.use_lora,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_alpha,
