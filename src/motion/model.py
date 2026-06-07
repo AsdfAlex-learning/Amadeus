@@ -401,6 +401,15 @@ class FullDuplexDiT(nn.Module):
         text_feat = self.text_encoder(text_prompts, device).unsqueeze(1).expand(-1, T, -1)
         identity_feat = self.identity_embedding(identity_ids).unsqueeze(1).expand(-1, T, -1)
 
+        # M1 fix: modality dropout. The training data does not carry real
+        # camera frames — they are zero-filled. Without dropout the model
+        # learns to depend on garbage visual features and cannot recover when
+        # real frames appear at inference. We randomly zero out the visual
+        # pathway 50% of the time during training so the model learns to
+        # produce motion from audio alone.
+        if self.training and torch.rand(1, device=device).item() < 0.5:
+            visual_feat = torch.zeros_like(visual_feat)
+
         # ── Time + identity condition ──
         t_emb = self.time_embed(timesteps)
         c = t_emb + identity_feat.mean(dim=1) if identity_feat is not None else t_emb
