@@ -145,8 +145,12 @@ def train(
             noisy = sqrt_alpha_cumprod_t * motion + sqrt_one_minus_alpha_cumprod_t * noise
 
             with torch.amp.autocast(device_type=device, enabled=scaler is not None):
+                # X-prediction: model directly predicts the clean sample x_0
+                # Output is bounded to [0, 1] by Sigmoid — naturally compatible with
+                # Live2D parameter range. Inference must use x-prediction DDIM
+                # (see inference.py: _diffusion_infer).
                 pred = model(audio, tts_audio, visual, prompts, identity, t, noisy)
-                loss = criterion(pred, noise)
+                loss = criterion(pred, motion)
 
             if scaler is not None:
                 scaler.scale(loss).backward()
@@ -188,7 +192,7 @@ def train(
                     noisy = torch.sqrt(alpha_cumprod_t) * motion + torch.sqrt(1.0 - alpha_cumprod_t) * noise
                     with torch.amp.autocast(device_type=device, enabled=scaler is not None):
                         pred = model(audio, tts_audio, visual, prompts, identity, t, noisy)
-                        val_loss += criterion(pred, noise).item()
+                        val_loss += criterion(pred, motion).item()
             val_loss /= max(len(val_loader), 1)
             model.train()
 
