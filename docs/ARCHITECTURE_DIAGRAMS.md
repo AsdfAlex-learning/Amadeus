@@ -1,7 +1,26 @@
 # Amadeus 算法架构图 (Mermaid)
 
-> 生成日期: 2026-06-07  
-> 基于代码审查，反映当前实现状态（含已知问题）
+> **状态**: 反映 `fix/training-pipeline-issues` 分支合并后的当前代码
+> **更新日期**: 2026-06-07
+> **作用**: 用 Mermaid 图表描述当前系统的算法结构、训练流程和推理路径
+>
+> **问题历史**: 修复过程中发现的问题及解决方案见 `docs/TRAINING_PIPELINE_REVIEW.md` 和 `docs/adr/0002-x-prediction-and-50hz-alignment.md`
+
+---
+
+## 目录
+
+1. [系统数据流总览](#1-系统数据流总览)
+2. [FullDuplexDiT 模型架构](#2-fullduplexdit-模型架构)
+3. [DiT Block 内部结构](#3-dit-block-内部结构)
+4. [训练管线流程](#4-训练管线流程)
+5. [推理管线流程](#5-推理管线流程)
+6. [LoRA 微调架构](#6-lora-微调架构)
+7. [预处理管线数据流](#7-预处理管线数据流)
+8. [性能参数后处理详解](#8-性能参数后处理详解)
+9. [训练数据 fps 对齐](#9-训练数据-fps-对齐)
+10. [三模态性能引擎状态](#10-三模态性能引擎状态)
+11. [x-Prediction 训练全景](#11-x-prediction-训练全景)
 
 ---
 
@@ -33,23 +52,24 @@ flowchart TB
         FACE -->|"gaze, expression<br/>face_detected"| PERCEPT["CameraPerception<br/>结果"]
     end
 
-    subgraph MotionPipeline["运动管线 ⚠️"]
+    subgraph MotionPipeline["运动管线"]
         MIC -->|"原始音频"| USR_AUDIO["user_audio<br/>(16kHz)"]
         TTS_AUDIO --> TTS_AUDIO_BUF["tts_audio<br/>(16kHz)"]
         PERCEPT -->|"text_prompt"| TEXT_PROMPT["情绪描述文本"]
 
-        USR_AUDIO --> DIT["FullDuplexDiT<br/>Mini-LPM"]
+        USR_AUDIO --> DIT["FullDuplexDiT<br/>Mini-LPM<br/>(x-prediction)"]
         TTS_AUDIO_BUF --> DIT
         CAM_FRAMES["visual_frames<br/>(5×224×224)"] --> DIT
         TEXT_PROMPT --> DIT
         CHAR_ID["identity_id"] --> DIT
 
-        DIT -->|"50 frames × 45 params"| PERF["PerformanceEngine<br/>(Persona 后处理)"]
+        DIT -->|"T × 45 params<br/>T = Hubert 推导"| PERF["PerformanceEngine<br/>(Persona 后处理)"]
         PERF -->|"调整后参数"| RENDER["Live2D Renderer<br/>(live2d-py + PySide6)"]
     end
 
-    style DIT fill:#ff6b6b,stroke:#c92a2a,color:#fff
+    style DIT fill:#1a1a2e,stroke:#4a90d9,color:#fff
     style PERF fill:#51cf66,stroke:#2b8a3e,color:#fff
+    style RENDER fill:#4a90d9,stroke:#2b5d8e,color:#fff
 ```
 
 ## 2. FullDuplexDiT 模型架构
@@ -64,8 +84,8 @@ flowchart TB
         ID["identity_ids<br/>(B,)"]
     end
 
-    subgraph Encoders["冻结编码器 (94M+2.5M+4.4M ≈ 101M)"]
-        HE["HubertEncoder<br/>facebook/hubert-base-ls960<br/>(768-dim @50Hz)<br/>⚠️ 共享于 Listen/Speak"]
+    subgraph Encoders["冻结编码器 (~101M)"]
+        HE["HubertEncoder<br/>facebook/hubert-base-ls960<br/>768-dim @50Hz<br/>(Listen/Speak 共享)"]
         VE["VisualEncoder<br/>MobileNetV3-Small + proj<br/>(512→320)"]
         TE["TextEncoder<br/>BERT-tiny + proj<br/>(128→320)"]
     end
@@ -135,25 +155,26 @@ flowchart TB
     VF_CROSS -->|"listen"| CA0
     TP_CROSS -->|"speak"| CA1
 
-    subgraph OutputHead["输出头 ⚠️ CRITICAL BUG"]
+    subgraph OutputHead["输出头 (Sigmoid 约束 ∈ [0, 1])"]
         direction TB
         TRANS["Transpose<br/>(B, T, 320) → (B, 320, T)"]
         C1["Conv1d(320, 320, k=5)<br/>+ GELU + Dropout"]
         C2["Conv1d(320, 160, k=5)<br/>+ GELU + Dropout"]
-        C3["Conv1d(160, 45, k=5)<br/>+ Sigmoid ⚠️"]
-        OUT["output<br/>(B, T, 45) ∈ [0, 1]"]
+        C3["Conv1d(160, 45, k=5)<br/>+ Sigmoid"]
+        OUT["output<br/>(B, T, 45) ∈ [0, 1]<br/>(x_0 预测)"]
     end
 
     BLOCKS --> TRANS --> C1 --> C2 --> C3 --> OUT
 
     NOISE["noisy_params<br/>(B, T, 45)"] --> X["x = noisy_params"] --> BLOCKS
 
-    style C3 fill:#ff6b6b,stroke:#c92a2a,color:#fff
-    style HE fill:#ffd43b,stroke:#e67700,color:#000
+    style C3 fill:#d0bfff,stroke:#7950f2,color:#000
+    style HE fill:#fff5d6,stroke:#e67700,color:#000
     style C2 fill:#d0bfff,stroke:#7950f2,color:#000
+    style OUT fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-> ⚠️ **Sigmoid + ε-prediction**: 输出 Sigmoid 范围 [0,1]，但训练目标是标准正态噪声 N(0,1)，数学上不兼容。应切换到 x-prediction 或移除 Sigmoid。
+> **Sigmoid 含义**: 输出被约束在 `[0, 1]`,与 Live2D 参数范围天然对齐。配合 **x-prediction** 损失 (`loss = MSE(pred, motion)`),Sigmoid 是模型的正确约束,不再是不兼容的 bug。
 
 ## 3. DiT Block 内部结构
 
@@ -202,21 +223,22 @@ flowchart TB
         direction TB
         NPZ_DATA[".npz 文件目录"] --> SCAN["_scan_npz()<br/>查找 npz + 对应 wav"]
         SCAN --> LOAD["_get_npz_item()"]
-        LOAD --> CHUNk["随机块选择<br/>chunk_duration=1.0s"]
-        CHUNk --> PAD["⚠️ 25fps→50fps<br/>零填充 (50% 零!)"]
-        PAD --> BATCH["{'user_audio': (16000,),<br/>'tts_audio': zeros,<br/>'visual_frames': zeros ⚠️<br/>'text_prompt': '',<br/>'identity_id': 0,<br/>'motion': (50, 45)}"]
+        LOAD --> RESAMPLE["_resample_motion()<br/>按 .npz 中 fps 字段<br/>线性插值 → 50Hz"]
+        RESAMPLE --> CHUNk["随机块选择<br/>chunk_duration=1.0s"]
+        CHUNk --> BATCH["{'user_audio': (16000,),<br/>'tts_audio': zeros,<br/>'visual_frames': zeros,<br/>'text_prompt': '',<br/>'identity_id': 0,<br/>'motion': (50, 45)}"]
     end
 
     subgraph TrainingLoop["训练循环 (train.py)"]
         direction TB
         BATCH --> DIFF["DDPM 前向过程<br/>t ~ Uniform(0, 999)<br/>noise ~ N(0,1)<br/>noisy = √ᾱ_t · x_0 + √(1-ᾱ_t) · noise"]
         DIFF --> PRED["model(audio, tts, visual, prompt, id, t, noisy)"]
-        PRED --> LOSS["⚠️ loss = MSELoss(pred, noise)<br/>但 pred ∈ [0,1] (Sigmoid)<br/>noise ∈ ℝ (标准正态)<br/>→ 不兼容!"]
-        LOSS -->|"backward"| GRAD["梯度累积 × grad_accum_steps"]
-        GRAD --> OPT["AdamW<br/>⚠️ 缺 weight_decay"]
-        OPT -->|"每 epoch"| SCHED["CosineAnnealingLR<br/>⚠️ 缺 warmup"]
-        SCHED -->|"每 10 epoch"| CKPT["保存检查点<br/>⚠️ 不含 optimizer 状态"]
-        SCHED --> VAL["验证集评估<br/>(10% random_split)"]
+        PRED --> LOSS["loss = MSELoss(pred, motion)<br/>(x-prediction:<br/>Sigmoid 输出 ∈ [0,1]<br/>与 motion ∈ [0,1] 对齐)"]
+        LOSS -->|"backward"| GRAD["梯度累积 × grad_accum_steps<br/>+ grad clip (max_norm=1.0)"]
+        GRAD --> OPT["AdamW<br/>weight_decay=0.01"]
+        OPT -->|"每 step"| SCHED["SequentialLR<br/>LinearLR (warmup) →<br/>CosineAnnealingLR"]
+        SCHED --> EMA["EMA 更新<br/>(可选, decay=0.999)"]
+        EMA -->|"每 epoch"| VAL["验证集评估 (10%)<br/>早停 patience=N"]
+        VAL -->|"每 10 epoch"| CKPT["完整快照检查点<br/>model + optimizer +<br/>scheduler + scaler +<br/>EMA + epoch"]
     end
 
     subgraph LoRA["LoRA 微调 (--use_lora)"]
@@ -226,9 +248,11 @@ flowchart TB
         LORA_TRAIN --> LORA_SAVE["save_lora() → lora_adapter.pt<br/>仅保存 A/B 矩阵 (~MB)"]
     end
 
-    style PAD fill:#ff6b6b,stroke:#c92a2a,color:#fff
-    style LOSS fill:#ff6b6b,stroke:#c92a2a,color:#fff
-    style OPT fill:#ffd43b,stroke:#e67700,color:#000
+    style RESAMPLE fill:#d3f9d8,stroke:#2b8a3e,color:#000
+    style LOSS fill:#d3f9d8,stroke:#2b8a3e,color:#000
+    style OPT fill:#d0ebff,stroke:#1971c2,color:#000
+    style SCHED fill:#d0ebff,stroke:#1971c2,color:#000
+    style CKPT fill:#fff5d6,stroke:#e67700,color:#000
 ```
 
 ## 5. 推理管线流程
@@ -239,31 +263,32 @@ flowchart TB
         direction TB
         MIC_IN["麦克风输入<br/>(16kHz)"] --> BUF["_audio_buffer<br/>(deque)"]
         BUF -->|"chunk_size 采样"| CHUNK["音频块<br/>(16000 samples)"]
-        
+
         TTS_IN["TTS 音频流"] --> TTS_BUF["_tts_buffer<br/>(deque)"]
-        
+
         CAM_IN["摄像头帧"] --> VIS_BUF["_visual_buffer<br/>(list, max 100)"]
     end
 
     subgraph Inference["DiffusionMotionInference 推理"]
         direction TB
-        CHUNK --> DDIFF["4-step DDIM 去噪"]
-        TTS_BUF --> DDIFF
+        CHUNK --> T_DERIVE["从 Hubert 编码器输出<br/>推导 T (动态,非硬编码)"]
+        TTS_BUF --> T_DERIVE
         VIS_BUF --> PREP_VIS["_prepare_visual_frames<br/>(5帧采样)"]
-        PREP_VIS --> DDIFF
+        PREP_VIS --> T_DERIVE
 
-        subgraph DDIM["⚠️ DDIM 步骤 (非标准)"]
+        subgraph DDIM["x-Prediction DDIM (4步, η=0)"]
             direction TB
-            INIT["params ~ N(0,1)<br/>T=50 硬编码 ⚠️"]
-            STEP1["t=999→749<br/>pred = model(..., t, params)<br/>params = (params - β/√(1-ᾱ) · pred) / √(1-β) + σ·noise"]
-            STEP2["t=749→499<br/>同上"]
-            STEP3["t=499→249<br/>同上"]
-            STEP4["t=249→0<br/>同上，无 noise"]
+            INIT["x_T ~ N(0,1)<br/>(B, T, 45)"]
+            STEP1["t=999→749<br/>pred_x0 = model(...)<br/>pred_eps = (x_t - √ᾱ_t·pred_x0) / √(1-ᾱ_t)"]
+            STEP2["t=749→499<br/>x_{t-1} = √ᾱ_{t-1}·pred_x0<br/>+ √(1-ᾱ_{t-1}-σ²)·pred_eps"]
+            STEP3["t=499→249 (同 STEP2)"]
+            STEP4["t=249→0 (同 STEP2, 无 noise)"]
             INIT --> STEP1 --> STEP2 --> STEP3 --> STEP4
         end
 
-        DDIFF -->|"50 frames × 45 params"| PERF["PerformanceEngine<br/>(Persona 后处理)"]
-        
+        T_DERIVE --> DDIM
+        DDIM -->|"T frames × 45 params"| PERF["PerformanceEngine<br/>(Persona 后处理)"]
+
         subgraph PerfPost["PerformanceEngine 后处理"]
             direction TB
             GS["gesture_scale<br/>整体运动幅度 ×(val-0.5)+0.5"]
@@ -281,13 +306,13 @@ flowchart TB
         end
 
         RESULT --> CALLBACKS["_param_callbacks<br/>→ Live2DWidget.push_params()"]
+
+        LORA_HOT["set_character_id()<br/>(运行时热加载)<br/>→ remove + apply + load_lora<br/>+ merge_lora"]
     end
 
-    style INIT fill:#ff6b6b,stroke:#c92a2a,color:#fff
-    style STEP1 fill:#ffd43b,stroke:#e67700,color:#000
-    style STEP2 fill:#ffd43b,stroke:#e67700,color:#000
-    style STEP3 fill:#ffd43b,stroke:#e67700,color:#000
-    style STEP4 fill:#ffd43b,stroke:#e67700,color:#000
+    style DDIM fill:#d3f9d8,stroke:#2b8a3e,color:#000
+    style T_DERIVE fill:#d0ebff,stroke:#1971c2,color:#000
+    style LORA_HOT fill:#fff5d6,stroke:#e67700,color:#000
 ```
 
 ## 6. LoRA 微调架构
@@ -385,7 +410,7 @@ flowchart LR
     MAP_LOGIC --> L2D["live2d_params (T, 45) float32"]
 
     subgraph PostProcess["后处理"]
-        INTERP["_interpolate_bad_frames()<br/>坏帧 ← 邻居均值<br/>⚠️ O(n) list 查找"]
+        INTERP["_interpolate_bad_frames()<br/>坏帧 ← 邻居均值<br/>O(n) list 查找"]
         CLIP["np.clip(result, 0, 1)"]
     end
 
@@ -395,11 +420,13 @@ flowchart LR
 
     AUDIO_OUT --> AUDIO_META["_audio.wav<br/>伴随 NPZ"]
 
-    NPZ_OUT --> DS["MotionDataset<br/>⚠️ fps 不匹配: 25→50"]
+    NPZ_OUT --> DS["MotionDataset<br/>._resample_motion()<br/>按 npz.fps → 50Hz"]
     AUDIO_META --> DS
 
-    style DS fill:#ff6b6b,stroke:#c92a2a,color:#fff
+    style DS fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
+
+> **fps 对齐**: 数据集读取 `.npz` 中的 `fps` 字段(预处理时存下来的源帧率),按需要线性插值到模型期望的 50 Hz 速率。无需修改预处理脚本。
 
 ## 8. 性能参数后处理详解
 
@@ -408,7 +435,7 @@ flowchart TB
     INPUT["原始参数<br/>(T, 45) ∈ [0, 1]"]
 
     INPUT --> GS["gesture_scale<br/>new = 0.5 + (val - 0.5) × scale<br/>整体运动幅度缩放"]
-    
+
     GS --> MODE_CHECK{"模式?"}
 
     MODE_CHECK -->|speak/listen| EXPR["expressiveness<br/>face_params = 0.5 + (val - 0.5) × expr<br/>面部表情夸张度"]
@@ -418,7 +445,7 @@ flowchart TB
     IDLE_ENERGY --> MOUTH
 
     MOUTH --> HEAD_M["head_motion_range<br/>head_params × range<br/>头部/身体运动范围"]
-    
+
     HEAD_M --> REACT["react_speed<br/>EMA 时序平滑<br/>val[t] = val[t-1] + α × (val[t] - val[t-1])<br/>α ∈ [0, 1], 默认 0.5"]
 
     REACT --> FINAL["最终参数<br/>(T, 45) ∈ [0, 1]"]
@@ -428,7 +455,7 @@ flowchart TB
         EYE_IDS["眼部参数<br/>indices: 6-19<br/>eyeLOpen, browLY, ..."]
         HEAD_IDS["头部/身体参数<br/>indices: 31-39<br/>angleX/Y/Z, bodyAngleX/Y/Z"]
         OTHER_IDS["其他参数<br/>indices: 20-30, 40-44<br/>arms, hair, extras"]
-        
+
         MOUTH_IDS -.-> MOUTH
         EYE_IDS -.-> EXPR
         HEAD_IDS -.-> HEAD_M
@@ -438,30 +465,45 @@ flowchart TB
     style FINAL fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-## 9. 训练数据对齐问题详解
+## 9. 训练数据 fps 对齐
 
 ```mermaid
 flowchart LR
-    subgraph Problem["⚠️ FPS 不匹配问题"]
-        direction TB
-        VIDEO_25FPS["预处理<br/>target_fps = 25"] -->|"25 帧/秒"| NPZ_25["NPZ<br/>live2d_params: (T, 45)<br/>T = duration × 25"]
-        NPZ_25 --> DS["MotionDataset<br/>chunk_motion_frames = 50"]
-        DS --> PAD["np.pad((0, 25), (0,0))<br/>⚠️ 50% 零填充!"]
-        PAD --> MODEL["模型输入<br/>(50, 45)<br/>后半全是零"]
+    subgraph Source["源数据 (任意 fps)"]
+        V["视频文件"]
     end
 
-    subgraph Solution["✅ 修复方案"]
+    V --> PP["PreprocessPipeline<br/>(target_fps=25 / 30 / 自定义)"]
+    PP --> NPZ[".npz 文件<br/>live2d_params (T, 45)<br/>T = duration × source_fps<br/>+ source_fps 字段"]
+
+    NPZ --> DS["MotionDataset.__getitem__"]
+
+    subgraph Resample["按需重采样"]
         direction TB
-        INTERP_FX["scipy.interpolate.interp1d<br/>25fps → 50fps 线性插值"]
-        INTERP_FX --> MODEL_FX["模型输入<br/>(50, 45)<br/>全部有效数据"]
+        READ_FPS["读取 npz.fps"]
+        RESAMPLE_MOTION["_resample_motion(<br/>arr, src_fps, dst_fps=50)<br/>np.interp 线性插值<br/>新长度 = round(T × 50/src_fps)"]
+        READ_FPS --> RESAMPLE_MOTION
     end
 
-    AUDIO_50["Hubert 编码器<br/>stride=320 @ 16kHz<br/>= 50 特征/秒"] -->|"50 帧/秒"| ALIGNED["音频与运动<br/>时间对齐"]
+    DS --> READ_FPS
+    RESAMPLE_MOTION --> ALIGNED["对齐后的运动<br/>(T', 45), T' = 50 × duration<br/>(50Hz)"]
 
-    style PAD fill:#ff6b6b,stroke:#c92a2a,color:#fff
-    style INTERP_FX fill:#d3f9d8,stroke:#2b8a3e,color:#000
-    style MODEL_FX fill:#d3f9d8,stroke:#2b8a3e,color:#000
+    subgraph Audio["音频对齐"]
+        WAVE["_audio.wav<br/>16kHz mono"]
+        HUB["Hubert 编码器<br/>stride=320 @ 16kHz<br/>= 50 特征/秒"]
+        WAVE --> HUB
+    end
+
+    HUB --> AUDIO_FEAT["audio features<br/>(50Hz)"]
+
+    AUDIO_FEAT --> MODEL["FullDuplexDiT<br/>音频 (50Hz) + 运动 (50Hz)<br/>时间轴完全对齐"]
+
+    style RESAMPLE_MOTION fill:#d3f9d8,stroke:#2b8a3e,color:#000
+    style ALIGNED fill:#d3f9d8,stroke:#2b8a3e,color:#000
+    style MODEL fill:#1a1a2e,stroke:#4a90d9,color:#fff
 ```
+
+> **数据流保证**: 无论预处理以多少帧率提取,数据集都会在加载时重采样到 50 Hz,与 Hubert 的 stride 完全对齐。模型永远不会收到 zero-padded 输入。
 
 ## 10. 三模态性能引擎状态
 
@@ -510,39 +552,81 @@ flowchart TB
     style SILENCE_STATE fill:#f8f9fa,stroke:#868e96,color:#000
 ```
 
-## 11. 问题影响链 (Mermaid)
+## 11. x-Prediction 训练全景
 
 ```mermaid
 flowchart TB
-    C1["🔴 C1: Sigmoid + ε-prediction<br/>不兼容"] -->|"训练无法收敛"| NO_TRAIN["❌ 无法训练"]
-    C2["🔴 C2: FPS 25→50<br/>50% 零填充"] -->|"模型学坏模式"| BAD_MOTION["❌ 运动后半段衰减"]
-    C2 -->|"与 C1 叠加"| NO_TRAIN
+    subgraph INPUT["训练输入"]
+        direction TB
+        AUDIO["user_audio<br/>(16000 samples)"]
+        MOTION["motion<br/>(50, 45) ∈ [0, 1]"]
+        VISUAL["visual_frames<br/>(5, 3, 224, 224)"]
+        PROMPT["text_prompt"]
+        ID["identity_id"]
+    end
 
-    H1["🟠 H1: DDIM 推理<br/>公式错误"] -->|"推理质量差"| BAD_INFER["❌ 推理输出无意义"]
-    C1 -->|"修复后需重写"| H1_FX["DDIM x-prediction"]
-    
-    H2["🟠 H2: LoRA<br/>无推理加载"] -->|"角色特化不可用"| NO_CHAR["❌ 无法切换角色"]
-    
-    M1["🟡 M1: 零视觉帧<br/>视觉通路未训练"] -->|"推理时视觉无效"| NO_VIS["⚠️ 摄像头感知浪费"]
-    
-    M2["🟡 M2: weight_decay<br/>未传入优化器"] -->|"可能过拟合"| OVERFIT["⚠️ 小数据集过拟合"]
-    
-    M3["🟡 M3: T=50<br/>硬编码"] -->|"变长音频不同步"| DESYNC["⚠️ 音画不同步"]
-    M4["🟡 M4: warmup<br/>未实现"] -->|"训练初期不稳定"| UNSTABLE["⚠️ 早期训练波动"]
+    subgraph DIFFUSION["x-Prediction Diffusion"]
+        direction TB
+        T_SAMPLE["t ~ Uniform(0, 999)"]
+        NOISE["ε ~ N(0, I)"]
+        FORWARD["noisy = √ᾱ_t · motion<br/>+ √(1-ᾱ_t) · ε"]
+        T_SAMPLE --> FORWARD
+        NOISE --> FORWARD
+    end
 
-    style C1 fill:#ff6b6b,stroke:#c92a2a,color:#fff
-    style C2 fill:#ff6b6b,stroke:#c92a2a,color:#fff
-    style H1 fill:#ffd43b,stroke:#e67700,color:#000
-    style H2 fill:#ffd43b,stroke:#e67700,color:#000
-    style M1 fill:#ffe066,stroke:#e67700,color:#000
-    style M2 fill:#ffe066,stroke:#e67700,color:#000
-    style M3 fill:#ffe066,stroke:#e67700,color:#000
-    style M4 fill:#ffe066,stroke:#e67700,color:#000
-    style NO_TRAIN fill:#1a1a2e,stroke:#e03131,color:#fff
-    style BAD_INFER fill:#1a1a2e,stroke:#e67700,color:#fff
-    style NO_CHAR fill:#1a1a2e,stroke:#e67700,color:#fff
+    subgraph MODEL["FullDuplexDiT (x-prediction)"]
+        direction TB
+        ENC["冻结编码器<br/>(Hubert + MobileNet + BERT)"]
+        PROJ["投影层 + TimestepEmbedding<br/>+ IdentityEmbedding + ModeEmbedding"]
+        DIT["DiT × 4<br/>(Listen/Speak 交错)"]
+        HEAD["Conv1d × 3 + Sigmoid<br/>→ pred_x0 ∈ [0, 1]"]
+        ENC --> PROJ --> DIT --> HEAD
+    end
+
+    subgraph LOSS["损失与优化"]
+        direction TB
+        X_LOSS["loss = MSE(pred_x0, motion)<br/>(Sigmoid 输出与 [0,1] target 兼容)"]
+        BACKWARD["backward + 梯度累积<br/>+ grad clip (max_norm=1.0)"]
+        OPT["AdamW(lr=1e-4, weight_decay=0.01)"]
+        SCHED["SequentialLR<br/>(LinearLR warmup → Cosine)"]
+        EMA["EMA 更新 (可选)<br/>decay=0.999"]
+        EARLY["早停 patience=N<br/>(验证损失驱动)"]
+        X_LOSS --> BACKWARD --> OPT --> SCHED --> EMA --> EARLY
+    end
+
+    subgraph OUTPUT["训练产出"]
+        direction TB
+        SNAP["完整快照检查点<br/>model + optimizer +<br/>scheduler + scaler +<br/>EMA + epoch"]
+        LORA["LoRA 适配器<br/>(若 --use_lora)<br/>~MB/角色"]
+        NEXT["恢复训练 / 部署推理"]
+        SNAP --> NEXT
+        LORA --> NEXT
+    end
+
+    subgraph INFER["推理 (x-prediction DDIM)"]
+        direction TB
+        HOT["set_character_id()<br/>热加载角色 LoRA"]
+        DDIM_INF["4步 x-DDIM<br/>T 从 Hubert 推导<br/>η=0 确定性"]
+        PERF["PerformanceEngine<br/>(persona 后处理)"]
+        LIVE2D["Live2D Renderer<br/>(60fps)"]
+        HOT --> DDIM_INF --> PERF --> LIVE2D
+    end
+
+    INPUT --> DIFFUSION
+    DIFFUSION -->|"noisy + 条件"| MODEL
+    MODEL -->|"pred_x0"| LOSS
+    LOSS --> OUTPUT
+    NEXT -->|"checkpoint"| INFER
+
+    style MOTION fill:#d3f9d8,stroke:#2b8a3e,color:#000
+    style X_LOSS fill:#d3f9d8,stroke:#2b8a3e,color:#000
+    style EMA fill:#d0ebff,stroke:#1971c2,color:#000
+    style SNAP fill:#fff5d6,stroke:#e67700,color:#000
+    style LORA fill:#d0bfff,stroke:#7950f2,color:#000
+    style DDIM_INF fill:#d3f9d8,stroke:#2b8a3e,color:#000
+    style LIVE2D fill:#1a1a2e,stroke:#4a90d9,color:#fff
 ```
 
 ---
 
-*图中红色 (⚠️ / 🔴) 标记为已知问题，详见 `docs/TRAINING_PIPELINE_REVIEW.md`。*
+*本文件反映 `fix/training-pipeline-issues` 分支合并后的代码状态。所有训练阻断问题 (C1/C2) 与推理缺陷 (H1/H2) 均已修复;质量改进 (M1–M4) 与最佳实践 (L2–L5) 已集成。完整问题史与修复决策见 `docs/TRAINING_PIPELINE_REVIEW.md` 和 `docs/adr/0002-x-prediction-and-50hz-alignment.md`。*
