@@ -4,50 +4,61 @@
 
 Amadeus is a modular pipeline that processes multimodal input (voice, camera) through a series of independent components, drives a Live2D character with synthesized motion, and outputs voice responses through TTS.
 
-```
-                         ┌─────────────────┐
-                         │   config.yaml    │
-                         └────────┬────────┘
-                                  │
-    ┌──────────┐   ┌──────────┐   │   ┌──────────┐   ┌──────────┐
-    │  Camera  │   │   Mic    │   │   │ Dialogue │   │   TTS    │
-    │Perception│   │ Capture  │   │   │  Model   │   │  Engine  │
-    └────┬─────┘   └────┬─────┘   │   └────┬─────┘   └────┬─────┘
-         │              │         │        │              │
-         ▼              ▼         │        ▼              │
-    ┌─────────┐   ┌──────────┐    │   ┌──────────┐       │
-    │MediaPipe│   │    VAD    │    │   │ Persona  │       │
-    │  Face   │   │(energy)   │    │   │ Context  │       │
-    └────┬─────┘   └────┬─────┘    │   └──────────┘       │
-         │              │         │                       │
-         │         ┌────▼────┐    │                       │
-         │         │Whisper  │    │                       │
-         │         │  .cpp   │    │                       │
-         │         └────┬────┘    │                       │
-         │              │         │                       │
-         │              ▼         ▼                       │
-         │         ┌─────────────────┐                   │
-         │         │   AudioPipeline │                   │
-         │         └────────┬────────┘                   │
-         │                  │ text                       │
-         │                  ▼                            │
-         │         ┌────────────────┐                    │
-         │         │ AmadeusWindow  │                    │
-         │         │  (PySide6/Qt6) │◄───────────────────┘
-         │         └───────┬────────┘   stream response
-         │                 │
-         │    ┌────────────┼────────────┐
-         │    │            │            │
-         ▼    ▼            ▼            ▼
-    ┌──────────┐  ┌────────────┐  ┌──────────┐
-    │  Camera  │  │  Motion    │  │ Live2D   │
-    │  →Params │  │ Inference  │  │ Renderer │
-    └──────────┘  └─────┬──────┘  └──────────┘
-                        │
-                   ┌────▼─────┐
-                   │ Mini-LPM │
-                   │  Model   │
-                   └──────────┘
+```mermaid
+flowchart TB
+    CFG[("config.yaml")]
+
+    subgraph INPUTS["Inputs"]
+        CAM["Camera<br/>Perception"]
+        MIC["Mic<br/>Capture"]
+        DLG["Dialogue<br/>Model"]
+        TTS["TTS<br/>Engine"]
+    end
+
+    subgraph PROCESS["Processing"]
+        MP["MediaPipe<br/>Face"]
+        VAD["VAD<br/>(energy)"]
+        WSP["Whisper<br/>.cpp"]
+    end
+
+    subgraph DIALOGUE["Dialogue Subsystem"]
+        PERS["Persona +<br/>Context"]
+    end
+
+    AP["AudioPipeline"]
+    WIN["AmadeusWindow<br/>(PySide6/Qt6)"]
+
+    subgraph OUTPUTS["Outputs"]
+        CPARAMS["Camera<br/>→ Params"]
+        MINF["Motion<br/>Inference"]
+        REND["Live2D<br/>Renderer"]
+    end
+
+    LPM[("Mini-LPM<br/>Model")]
+
+    CFG -.-> WIN
+
+    CAM --> MP
+    MIC --> VAD --> WSP --> AP
+    AP -->|"text"| WIN
+    WSP -.->|"perception events"| WIN
+
+    DLG --> PERS --> WIN
+    TTS -.->|"stream response"| WIN
+    TTS -.->|"TTS audio"| MINF
+
+    MP --> CPARAMS
+    MP -->|"gaze/expression<br/>face_detected"| MINF
+    WIN --> MINF
+    WIN --> REND
+    CPARAMS --> WIN
+    MINF --> LPM
+    LPM --> MINF
+    MINF -->|"params"| WIN
+
+    style WIN fill:#1a1a2e,stroke:#4a90d9,color:#fff
+    style LPM fill:#d94a90,stroke:#8b2c5e,color:#fff
+    style AP fill:#4a90d9,stroke:#2b5d8e,color:#fff
 ```
 
 ## Component Details
@@ -70,8 +81,24 @@ Amadeus is a modular pipeline that processes multimodal input (voice, camera) th
 
 **AudioPipeline** (`pipeline.py`): State machine orchestrating VAD → buffering → ASR:
 
-```
-IDLE → LISTENING → (speech detected) → buffering → (silence 1.2s) → ASR → text callback
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> IDLE
+    IDLE --> LISTENING : mic opened, VAD armed
+    LISTENING --> BUFFERING : speech detected<br/>(RMS > threshold)
+    BUFFERING --> PROCESSING : silence 1.2s
+    BUFFERING --> BUFFERING : continue capturing<br/>(max 15s)
+    PROCESSING --> EMIT : ASR returns text
+    EMIT --> LISTENING : ready for next utterance
+    EMIT --> IDLE : shutdown / pause
+
+    note right of BUFFERING
+      Pre-speech buffer
+      300 ms (avoid
+      clipping start
+      of utterances)
+    end note
 ```
 
 VAD is energy-based (RMS threshold). Includes pre-speech buffer (300ms) to avoid clipping start of utterances.
@@ -90,43 +117,55 @@ VAD is energy-based (RMS threshold). Includes pre-speech buffer (300ms) to avoid
 
 **FullDuplexDiT** (`model.py`): Core architecture — multimodal Diffusion Transformer with interlaced Listen/Speak layers. Five input streams: user audio, TTS audio, camera frames, text prompt, character identity. Output: 50 frames × 45 Live2D parameters.
 
-```
-User Audio (16kHz, 1sec)     TTS Audio (16kHz, 1sec)     Camera Frames (5×224×224)
-        │                            │                           │
-        ▼                            ▼                           ▼
-┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│  Hubert Encoder  │    │  Hubert Encoder  │    │ MobileNetV3      │
-│  (frozen, 94M)   │    │  (shared, 94M)   │    │ (frozen, 2.5M)   │
-│  768-dim @50Hz   │    │  768-dim @50Hz   │    │ 512-dim @50Hz    │
-└────────┬─────────┘    └────────┬─────────┘    └────────┬─────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
-    ┌─────────┐            ┌─────────┐            ┌─────────┐
-    │ Linear  │            │ Linear  │            │  Align  │
-    │ 768→320 │            │ 768→320 │            │ 512→320 │
-    └────┬────┘            └────┬────┘            └────┬────┘
-         │                       │                       │
-         └───────────┬───────────┘         ┌─────────────┘
-                     │                     │
-                     ▼                     ▼
-              ┌────────────────────────────────────┐
-              │    DiT Interlaced Blocks (4 layers) │
-              │  Even layers: Listen (cross-attn    │
-              │    with user audio + visual)        │
-              │  Odd layers:  Speak (cross-attn     │
-              │    with TTS audio + text prompt)    │
-              │  dim=320, 8 heads, AdaLN + FFN      │
-              └────────────────┬───────────────────┘
-                               │
-                               ▼
-                      ┌────────────────┐
-                      │  CNN Decoder   │
-                      │  Conv1d ×3 +   │
-                      │  Sigmoid       │
-                      └───────┬────────┘
-                              │
-                              ▼
-                  Live2D Parameters (50 frames × 45 values)
+```mermaid
+flowchart TB
+    subgraph INPUTS["5-Stream Inputs"]
+        UA["User Audio<br/>(16kHz, 1s)"]
+        TA["TTS Audio<br/>(16kHz, 1s)"]
+        VF["Camera Frames<br/>(5×224×224)"]
+        TP["Text Prompt"]
+        ID["Identity ID"]
+    end
+
+    subgraph ENC["Frozen Encoders"]
+        HE["Hubert Encoder<br/>(94M frozen)<br/>768-dim @50Hz"]
+        VE["MobileNetV3-Small<br/>(2.5M frozen)<br/>512-dim @50Hz"]
+    end
+
+    UA --> HE
+    TA --> HE
+    VF --> VE
+
+    HE -->|"768→320"| AP1["Audio proj 1<br/>(listen)"]
+    HE -->|"768→320"| AP2["Audio proj 2<br/>(speak)"]
+    VE -->|"512→320"| VPROJ["Visual proj"]
+
+    subgraph DIT["DiT Interlaced Blocks ×4 (dim=320, 8 heads)"]
+        direction TB
+        B0["Block 0: Listen<br/>self-attn + cross-attn<br/>(user audio + visual)"]
+        B1["Block 1: Speak<br/>self-attn + cross-attn<br/>(TTS audio + text)"]
+        B2["Block 2: Listen"]
+        B3["Block 3: Speak"]
+        B0 --> B1 --> B2 --> B3
+    end
+
+    AP1 -->|"listen_feat"| B0
+    AP2 -->|"speak_feat"| B1
+    VPROJ -->|"visual_feat"| B0
+    VPROJ -->|"visual_feat"| B2
+    TP -->|"text_feat"| B1
+    TP -->|"text_feat"| B3
+    ID -->|"identity_emb"| TIME["Time Embedding<br/>+ identity"]
+    TIME --> B0
+
+    B3 --> DEC["CNN Decoder<br/>Conv1d×3 + Sigmoid"]
+    DEC -->|"50 frames × 45"| OUT[("Live2D<br/>Parameters<br/>∈ [0, 1]")]
+
+    style HE fill:#ffe066,stroke:#e67700,color:#000
+    style DEC fill:#d0bfff,stroke:#7950f2,color:#000
+    style OUT fill:#d94a90,stroke:#8b2c5e,color:#fff
+    style AP1 fill:#d3f9d8,stroke:#2b8a3e,color:#000
+    style AP2 fill:#d0ebff,stroke:#1971c2,color:#000
 ```
 
 **PerformanceEngine** (`performance.py`): Persona-based post-processing on model output. Six configurable parameters applied as multiplicative adjustments in vectorized numpy. EMA temporal smoothing for `react_speed`. Supports 2D/3D arrays + silence/speak/listen modes.
@@ -167,43 +206,77 @@ These results are mapped to Live2D parameters (gaze → ParamAngleY, smile → P
 
 ### Conversation Loop
 
-```
-1. Mic captures audio → PyAudio callback
-2. VAD detects speech → buffers audio until silence
-3. Whisper.cpp transcribes → emits text
-4. Text added to ConversationContext → sent to DialogueModel
-5. LLM generates response → streamed to UI display
-6. Full response → TTS synthesizes audio → playback
+```mermaid
+flowchart LR
+    A1["Mic captures audio<br/>PyAudio callback"] --> A2
+    A2["VAD detects speech<br/>buffers until silence 1.2s"] --> A3
+    A3["Whisper.cpp transcribes<br/>emits text"] --> A4
+    A4["Text added to<br/>ConversationContext"] --> A5
+    A5["Sent to DialogueModel<br/>(Qwen2.5-3B)"] --> A6
+    A6["LLM streams response<br/>to UI display"] --> A7
+    A7["Full response sent to<br/>TTS for synthesis"] --> A8
+    A8["TTS audio plays<br/>via PyAudio"]
+
+    style A1 fill:#4a90d9,color:#fff
+    style A5 fill:#d94a90,color:#fff
+    style A8 fill:#51cf66,color:#fff
 ```
 
 ### Motion Loop
 
-```
-1. Mic raw audio → MotionInference.process_audio()
-2. Audio buffered → chunk assembled
-3. Mini-LPM forward pass → parameter sequence
-4. Parameters emitted frame-by-frame → Live2DWidget.push_params()
-5. Each paintGL frame consumes one parameter set → renderer.set_parameters()
+```mermaid
+flowchart LR
+    M1["Mic raw audio<br/>MotionInference.process_audio()"] --> M2
+    M2["Audio buffered<br/>chunk assembled (1s)"] --> M3
+    M3["Mini-LPM forward pass<br/>4-step x-DDIM"] --> M4
+    M4["Parameter sequence emitted<br/>frame-by-frame (50Hz)"] --> M5
+    M5["Live2DWidget.push_params()<br/>consumer queue"] --> M6
+    M6["Each paintGL frame<br/>renderer.set_parameters()"]
+
+    style M3 fill:#d94a90,color:#fff
+    style M6 fill:#51cf66,color:#fff
 ```
 
 ### Perception Loop
 
-```
-1. Camera captures frame → OpenCV
-2. MediaPipe FaceMesh processes → landmarks
-3. Gaze/expression estimation → perception result
-4. Result mapped to Live2D parameters → Live2DWidget.push_params()
+```mermaid
+flowchart LR
+    P1["Camera captures frame<br/>OpenCV @ 30fps"] --> P2
+    P2["MediaPipe FaceMesh<br/>processes landmarks"] --> P3
+    P3["Gaze / expression<br/>estimation"] --> P4
+    P4["Perception result<br/>(text_prompt + visual)"] --> P5
+    P5["Mapped to Live2D params<br/>Live2DWidget.push_params()"]
+
+    style P2 fill:#ffd43b,color:#000
+    style P5 fill:#51cf66,color:#fff
 ```
 
 ## Threading Model
 
-| Thread | Responsibility |
-|---|---|
-| Main (Qt) | GUI event loop, OpenGL rendering |
-| Audio callback | Microphone data, VAD |
-| ASR (sync) | Whisper.cpp transcription |
-| Generation | LLM inference (daemon) |
-| Camera | OpenCV capture + MediaPipe (daemon) |
+```mermaid
+flowchart TB
+    subgraph MAIN["Main Thread (Qt)"]
+        GUI["GUI event loop<br/>OpenGL rendering"]
+    end
+
+    subgraph WORKERS["Worker Threads"]
+        AUDIO["Audio Callback<br/>(PyAudio thread)"]
+        ASR["ASR (sync)<br/>Whisper.cpp"]
+        GEN["Generation (daemon)<br/>LLM inference"]
+        CAM["Camera (daemon)<br/>OpenCV + MediaPipe"]
+    end
+
+    BR["_PipelineBridge<br/>(QObject signals/slots)"]
+
+    AUDIO -- "raw frames<br/>(Signal)" --> BR
+    ASR -- "transcript<br/>(Signal)" --> BR
+    GEN -- "streamed tokens<br/>(Signal)" --> BR
+    CAM -- "perception result<br/>(Signal)" --> BR
+    BR -- "queued Slot<br/>(UI thread)" --> GUI
+
+    style MAIN fill:#1a1a2e,stroke:#4a90d9,color:#fff
+    style BR fill:#d94a90,stroke:#8b2c5e,color:#fff
+```
 
 Qt `Signal`/`Slot` bridge (`_PipelineBridge`) handles thread-safe communication from audio/generation threads to the UI thread.
 

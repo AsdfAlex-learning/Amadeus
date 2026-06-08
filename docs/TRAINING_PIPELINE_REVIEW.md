@@ -171,12 +171,33 @@ if len(motion_chunk) < self.chunk_motion_frames:  # 25 < 50
 
 **数据流全链路分析**:
 
-```
-视频 (25fps) → FaceLandmarker (25fps blendshapes) → ARKitToLive2D (25fps × 45 params)
-  → NPZ 存储 (25fps)
-  → MotionDataset (chunk_motion_frames=50) → 50% zero padding
-  → Model (output: 50 frames × 45 params)
-  → Inference (hardcoded T=50)
+```mermaid
+flowchart TB
+    subgraph SRC["Source (25 fps)"]
+        V["视频文件<br/>(25fps)"]
+    end
+
+    subgraph PP["Preprocessing Pipeline"]
+        FL["FaceLandmarker<br/>25fps × 52 ARKit"]
+        MAPPER["ARKitToLive2D<br/>25fps × 45 params"]
+        NPZ[".npz 存储<br/>(25fps motion)"]
+    end
+
+    subgraph DS["Dataset Loading"]
+        MD["MotionDataset<br/>chunk_motion_frames=50"]
+        PAD["⚠️ 50% 零填充<br/>(旧行为)"]
+    end
+
+    subgraph MODEL["Model & Inference"]
+        M["Model output<br/>50 frames × 45"]
+        INF["Inference<br/>T=50 hardcoded"]
+    end
+
+    V --> FL --> MAPPER --> NPZ --> MD --> PAD --> M --> INF
+
+    style PAD fill:#ff6b6b,stroke:#c92a2a,color:#fff
+    style MAPPER fill:#ffd43b,stroke:#e67700,color:#000
+    style M fill:#d0bfff,stroke:#7950f2,color:#000
 ```
 
 **修复方案（三选一）**:
@@ -221,12 +242,37 @@ if motion_chunk.shape[0] < self.chunk_motion_frames:
 params = (params - (beta_t / sqrt(1 - alpha_t)) * pred) / sqrt(1 - beta_t) + sigma_t * noise
 ```
 
-标准 DDIM ε-prediction 公式为：
+标准 DDIM ε-prediction 公式与 x-prediction 修复公式的对比：
 
-```
-pred_x0 = (x_t - √(1-α_t) · ε_θ) / √(α_t)
-dir_xt  = √(1 - α_{t-1} - σ²) · ε_θ
-x_{t-1} = √(α_{t-1}) · pred_x0 + dir_xt + σ_t · noise
+```mermaid
+flowchart TB
+    subgraph WRONG["❌ 当前实现 (不正确)"]
+        W1["x_{t-1} = (x_t - β_t / √(1-ᾱ_t) · pred) / √(1-β_t)<br/>+ √β_t · noise"]
+    end
+
+    subgraph STD["✓ 标准 ε-prediction DDIM"]
+        S1["pred_x0 = (x_t - √(1-ᾱ_t) · ε_θ) / √(ᾱ_t)"]
+        S2["dir_xt  = √(1 - ᾱ_{t-1} - σ²) · ε_θ"]
+        S3["x_{t-1} = √(ᾱ_{t-1}) · pred_x0<br/>+ dir_xt + σ_t · noise"]
+        S1 --> S2 --> S3
+    end
+
+    subgraph FIXED["✅ 修复后 (x-prediction DDIM, 与训练一致)"]
+        F1["模型直接预测 pred_x0 ∈ [0,1]"]
+        F2["pred_eps = (x_t - √ᾱ_t · pred_x0) / √(1-ᾱ_t)"]
+        F3["α_prev = ᾱ_{t-1}"]
+        F4["x_{t-1} = √α_prev · pred_x0<br/>+ √(1-α_prev-σ²) · pred_eps<br/>+ σ · noise  (η=0)"]
+        F1 --> F2
+        F2 --> F3
+        F3 --> F4
+    end
+
+    WRONG -.->|"修复"| FIXED
+    STD -.->|"训练同步 (C1)"| FIXED
+
+    style WRONG fill:#ffe0e0,stroke:#c92a2a,color:#000
+    style STD fill:#e7f5ff,stroke:#1971c2,color:#000
+    style FIXED fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
 当前代码使用 `beta_t`（单步 β）代替 `1 - alpha_cumprod_t`（累积 α），分母使用 `√(1 - beta_t)` 而非正确的 DDIM 推导。此公式既不符合 DDPM 也不符合 DDIM。
@@ -539,29 +585,57 @@ motion_chunk = motion[start:start + self.chunk_samples]  # chunk_samples=16000
 
 ### 架构总览
 
-```
-FullDuplexDiT (432行, ~124M 参数)
-├── HubertEncoder (frozen, ~94M) — 768-dim 音频特征 @50Hz
-│   └── facebook/hubert-base-ls960
-├── VisualEncoder (MobileNetV3-Small, frozen, ~2.5M) — 512-dim 视觉特征
-│   └── proj: Linear(576 → 320)
-├── TextEncoder (BERT-tiny, frozen, ~4.4M) — 128-dim 文本特征
-│   └── proj: Linear(128 → 320)
-├── Projections
-│   ├── audio_proj: Linear(768 → 320) — 共享于 Listen/Speak 模式
-│   ├── cross_proj: Linear(640 → 320) — 拼接条件投影
-│   └── mode_embedding: Embedding(2 → 320) — Listen/Speak 模式标识
-├── TimestepEmbedding (Sinusoidal + MLP, 320-dim)
-├── IdentityEmbedding (16 → 320) — 角色身份标识
-├── DiT Blocks ×4 (Interleaved Listen/Speak)
-│   ├── AdaLN (LayerNorm + scale/shift from timestep)
-│   ├── Self-Attention (8 heads, dim=320)
-│   ├── Cross-Attention (8 heads, dim=320)
-│   └── FFN (320 → 1280 → 320, GELU + Dropout)
-└── Output Head (Conv1d×3 + Sigmoid → 45 params)
-    ├── Conv1d(320, 320, k=5, p=2) + GELU + Dropout
-    ├── Conv1d(320, 160, k=5, p=2) + GELU + Dropout
-    └── Conv1d(160, 45, k=5, p=2) + Sigmoid
+```mermaid
+flowchart TB
+    DIFF[("FullDuplexDiT<br/>432行, ~124M 参数")]
+
+    subgraph FROZEN["❄️ 冻结编码器 (~101M)"]
+        HUB["HubertEncoder<br/>~94M, 768-dim @50Hz<br/>facebook/hubert-base-ls960"]
+        VIS["VisualEncoder<br/>MobileNetV3-Small ~2.5M, 512-dim<br/>+ proj: Linear(576 → 320)"]
+        TXT["TextEncoder<br/>BERT-tiny ~4.4M, 128-dim<br/>+ proj: Linear(128 → 320)"]
+    end
+
+    subgraph PROJ["Projections (trainable ~0.3M)"]
+        AP["audio_proj: Linear(768 → 320)<br/>共享于 Listen/Speak"]
+        CP["cross_proj: Linear(640 → 320)"]
+        ME["mode_embedding: Embedding(2 → 320)"]
+    end
+
+    subgraph COND["Conditioning"]
+        TE["TimestepEmbedding<br/>(Sinusoidal + MLP, 320)"]
+        IE["IdentityEmbedding<br/>(16 → 320)"]
+    end
+
+    subgraph DIT["DiT Blocks ×4 (Interleaved Listen/Speak) ~15M"]
+        ADA["AdaLN: LayerNorm + scale/shift from timestep"]
+        SA["Self-Attention (8 heads, dim=320)"]
+        CA["Cross-Attention (8 heads, dim=320)"]
+        FFN["FFN: Linear 320 → 1280 → 320<br/>GELU + Dropout"]
+        ADA --> SA --> CA --> FFN
+    end
+
+    subgraph HEAD["Output Head (Conv1d×3 + Sigmoid) ~6M"]
+        C1["Conv1d(320, 320, k=5) + GELU + Dropout"]
+        C2["Conv1d(320, 160, k=5) + GELU + Dropout"]
+        C3["Conv1d(160, 45, k=5) + Sigmoid"]
+        C1 --> C2 --> C3
+    end
+
+    HUB --> AP
+    VIS --> VIS
+    TXT --> TXT
+    AP --> DIT
+    CP --> DIT
+    ME --> DIT
+    TE --> DIT
+    IE --> DIT
+    FFN --> C1
+    C3 --> OUT[("Live2D Params<br/>50 frames × 45 ∈ [0,1]")]
+
+    style DIFF fill:#1a1a2e,stroke:#4a90d9,color:#fff
+    style FROZEN fill:#fff5d6,stroke:#e67700,color:#000
+    style HEAD fill:#d0bfff,stroke:#7950f2,color:#000
+    style OUT fill:#d94a90,stroke:#8b2c5e,color:#fff
 ```
 
 **参数分布**:
