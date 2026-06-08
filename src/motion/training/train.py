@@ -51,8 +51,11 @@ def train(
             device = "cpu"
     logger.info(f"Training Full-Duplex DiT on {device}")
 
-    # Precompute diffusion schedule (DDPM linear)
-    betas = torch.linspace(1e-4, 0.02, num_diffusion_steps)
+    # Precompute diffusion schedule (DDPM linear). The tensor is moved to
+    # the target device once, ahead of the training loop, so that
+    # gather/index operations work on the same device as the training
+    # batches. (Bug discovered on RTX 4060 Ti: 2026-06-08.)
+    betas = torch.linspace(1e-4, 0.02, num_diffusion_steps, device=device)
     alphas = 1.0 - betas
     _alphas_cumprod = torch.cumprod(alphas, dim=0)
 
@@ -80,6 +83,7 @@ def train(
 
     # Resume from checkpoint if provided
     start_epoch = 0
+    _resume_state = None
     if resume_from is not None:
         resume_path = Path(resume_from)
         if resume_path.exists():
