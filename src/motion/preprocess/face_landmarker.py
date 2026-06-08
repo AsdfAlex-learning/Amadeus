@@ -136,7 +136,9 @@ class FaceLandmarkerExtractor:
 
     def _process_frame_tasks(self, frame: np.ndarray, default: dict) -> dict:
         import mediapipe as mp
-        frame_rgb = frame[:, :, ::-1]
+        # Ensure uint8 contiguous memory layout; some videos may surface
+        # a non-contiguous slice which mediapipe rejects.
+        frame_rgb = np.ascontiguousarray(frame[:, :, ::-1], dtype=np.uint8)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
         result = self._landmarker.detect(mp_image)
         if not result.face_blendshapes:
