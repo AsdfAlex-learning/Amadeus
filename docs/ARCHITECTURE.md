@@ -182,6 +182,7 @@ flowchart TB
 - `train.py`: **x-prediction** training loop. Features: val split, **full-snapshot checkpointing** (model + optimizer + scheduler + AMP scaler + EMA + epoch), resume (lossless from full snapshots, legacy raw-state_dict supported), `--dataset_type`, and full LoRA integration (`--use_lora`, `--lora_rank`, `--lora_alpha`). New flags: `--weight_decay`, `--warmup_steps`, `--ema_decay`, `--early_stopping_patience`.
 - `lora.py`: LoRA training module — `LoRALinear` / `LoRAConv1d` wrappers, `apply/remove/merge/save/load_lora` lifecycle API, monkey-patching approach (no model.py modification)
 - `ema.py`: Self-contained EMA of trainable parameters. No third-party dependency. Used for validation loss and final checkpoint save when `--ema_decay > 0`.
+- `visualize.py`: Post-training visualisation — loss curves from log files, ground-truth vs predicted motion overlays, and animated GIFs of motion parameters (matplotlib + Pillow only, no TensorBoard).
 
 **Inference** (`inference.py`): Streaming x-prediction diffusion inference with overlap-add. Maintains audio/visual/tts buffers, processes chunks of `chunk_size` seconds via **4-step x-prediction DDIM** (η=0 deterministic), emits parameter dictionaries frame-by-frame to callbacks. **T is dynamically derived from the Hubert encoder output length** (was previously hardcoded to 50). Loads and **hot-swaps character LoRA adapters** via `set_character_id()` — looks up `models/lora/<id>/lora_adapter.pt` and merges in place.
 

@@ -2,7 +2,7 @@
 
 > **Amadeus** — 一个 LPM 启发的实时交互式 AI 伙伴系统，配备 Live2D 虚拟角色。
 >
-> 版本 0.1.0 | Python 3.11.5 | MIT License
+> 版本 0.2.0-dev | Python 3.11.5 | MIT License
 
 ---
 
@@ -346,17 +346,18 @@ flowchart TD
 ### 4.3 参数量分析
 
 | 组件 | 参数量 | 可训练 | fp16内存 | 说明 |
-|---|---|---|---|---|
+|---|---|---|---|---|---|
 | Hubert 编码器 (共享) | 94,371,712 | ❌ 冻结 | ~190MB | 预训练音频特征 |
 | MobileNetV3-Small | 2,500,000 | ❌ 冻结 | ~5MB | 视觉特征提取 |
 | BERT-tiny | 4,000,000 | ❌ 冻结 | ~8MB | 文本指令编码 |
 | 5路模态投影 | ~1,500,000 | ✅ | ~3MB | 768/512 → 320 |
+| 输入投影 (input_proj) | ~14,400 | ✅ | <1MB | 45→320, 将扩散潜在提升到DiT工作维度 |
 | 身份嵌入表 | ~5,000 | ✅ | <1MB | 16角色×320dim |
 | 时步嵌入 | ~400,000 | ✅ | <1MB | sin/cos+MLP |
 | DiT块 (4层, dim=320) | ~21,000,000 | ✅ | ~42MB | AdaLN+自注意+交叉注意+FFN |
 | CNN 解码头 | ~1,000,000 | ✅ | ~2MB | 3层Conv1d |
 | 模式嵌入 | ~640 | ✅ | <1MB | Listen/Speak标记 |
-| **合计** | **~124M** | **~24M 可训练** | **~250MB (fp16)** | |
+| **合计** | **~111M** | **~11.4M 可训练** | **~250MB (fp16)** | |
 
 24M 可训练参数 + 250MB fp16 模型大小意味着：
 
@@ -589,6 +590,16 @@ flowchart LR
   - 视觉模态 dropout (M1)、weight_decay 修复 (M2)、动态 T (M3)、warmup+cosine (M4)
   - EMA 权重 (L2)、早停 (L3)、完整检查点 (L4)、legacy 路径修复 (L5)
   - 详见 `docs/TRAINING_PIPELINE_REVIEW.md` + `docs/ARCHITECTURE_DIAGRAMS.md` + `docs/adr/0002-*`
+- [x] **运行时 bug 修复** (2026-06-08, RTX 4060 Ti):
+  - 输入投影 (input_proj: Linear 45→320) — 修复 shape 不匹配
+  - Cross-attention 时间轴对齐 — 线性插值对齐 T
+  - Dropout `.item()` 断 autograd — 改为 bernoulli mask
+  - `_resume_state` 未初始化 — 提前初始化
+  - 扩散调度器在 CPU — 移到目标设备
+  - MediaPipe uint8 contiguity — `np.ascontiguousarray`
+- [x] **HDTF 数据集验证**: 300 片段预处理, 3-epoch smoke test 通过
+- [x] **训练可视化**: `src/motion/training/visualize.py` (loss curve + GIF + motion comparison)
+- [x] **训练操作指南**: `docs/TRAINING_GUIDE.md`
 
 ### 计划中
 

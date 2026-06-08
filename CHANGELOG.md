@@ -89,6 +89,60 @@ commits, each independently revertible):
   machine, and issue impact chain.
 - New: `docs/adr/0002-x-prediction-and-50hz-alignment.md` — ADR
   documenting the C1 and C2 decisions.
+- New: `docs/TRAINING_GUIDE.md` — step-by-step operational guide for
+  training the base model on the HDTF dataset.
+- New: `src/motion/training/visualize.py` — loss curves, motion
+  comparison plots, and animated GIFs of motion parameters.
+- New: `scripts/train_base.py` — convenience wrapper for long-running
+  base model training with all features (EMA, early stopping, full
+  checkpoints).
+
+### Runtime-Discovered Bug Fixes (2026-06-08, RTX 4060 Ti)
+
+When actually running the model on GPU with real data, three latent
+bugs surfaced that the code review did not catch because nothing had
+ever executed the model end-to-end:
+
+- **Missing input projection** (`src/motion/model.py`): `forward()`
+  assigned `x = noisy_params` (B, T, 45) and then added DiT-block
+  embeddings (B, T, 320) — shape mismatch. Added `Linear(45 → 320)`
+  input projection to lift the diffusion latent into the DiT's working
+  dimension.
+- **Cross-attention temporal misalignment** (`src/motion/model.py`):
+  Hubert produces 49 features for 1 s of audio, the visual encoder
+  produces 5 frames, and the diffusion latent is T=50. They were
+  concatenated without aligning the time axis. Added linear-interp
+  resampling to bring all conditioning features to the same T.
+- **Dropout `.item()` breaks autograd** (`src/motion/model.py`): the
+  visual-dropout branch used `torch.rand(...).item() < 0.5`, which
+  synchronises the GPU and detaches the random choice from the
+  autograd graph. Replaced with a differentiable bernoulli mask.
+- **`_resume_state` uninitialised** (`src/motion/training/train.py`):
+  when `resume_from=None` the variable was undefined. Initialised to
+  `None` up front.
+- **Diffusion schedule on wrong device** (`src/motion/training/train.py`):
+  `_alphas_cumprod` was created on CPU but indexed on CUDA. Moved to
+  target device at construction time.
+- **MediaPipe uint8 contiguity** (`src/motion/preprocess/face_landmarker.py`):
+  `frame[:, :, ::-1]` could produce a non-contiguous view that
+  mediapipe rejected. Wrapped in `np.ascontiguousarray(..., dtype=np.uint8)`.
+
+### Dataset & Training Validation
+
+- **HDTF dataset** (High-definition Talking Face): 4.76 GB clips.zip
+  downloaded from HuggingFace `Guangtian/HDTF`. 16,914 clips, 390×390,
+  25 fps, 81 frames each.
+- **300 clips preprocessed** via MediaPipe FaceLandmarker → 52 ARKit
+  blendshapes → 45 Live2D params in 104 s, 0 failures, 13 MB `.npz`
+  output.
+- **3-epoch smoke test** on RTX 4060 Ti 8 GB:
+  ```
+  Epoch 1: train=0.0320, val=0.3172
+  Epoch 2: train=0.0094, val=0.1492
+  Epoch 3: train=0.0081, val=0.0946
+  ```
+  Loss decreases on both splits; the model learns motion dynamics from
+  the preprocessed data. Full 200-epoch training takes ~2.3 hours.
 
 ## [Unreleased] - 2026-05-29
 
