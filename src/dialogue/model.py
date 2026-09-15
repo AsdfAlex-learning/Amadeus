@@ -1,3 +1,4 @@
+import threading
 from collections.abc import Generator
 from pathlib import Path
 
@@ -12,6 +13,12 @@ class DialogueModel:
         self.model_size = dialogue_cfg.get("model_size", "3B")
         self.quantization = dialogue_cfg.get("quantization", "int8")
         self.max_tokens = int(dialogue_cfg.get("max_context_tokens", 4096))
+        # Generation parameters. max_new_tokens was previously hardcoded to 512
+        # inside generate() while self.max_tokens (the context budget) went unused.
+        self.max_new_tokens = int(dialogue_cfg.get("max_new_tokens", 512))
+        self.temperature = float(dialogue_cfg.get("temperature", 0.7))
+        self.top_p = float(dialogue_cfg.get("top_p", 0.9))
+        self.repetition_penalty = float(dialogue_cfg.get("repetition_penalty", 1.1))
 
         self._model = None
         self._tokenizer = None
@@ -67,16 +74,15 @@ class DialogueModel:
         inputs = self._tokenizer(prompt, return_tensors="pt").to(self._device)
 
         result_chunks: list[str] = []
-        from threading import Thread
 
         def _run():
             outputs = self._model.generate(
                 **inputs,
-                max_new_tokens=512,
+                max_new_tokens=self.max_new_tokens,
                 do_sample=True,
-                temperature=0.7,
-                top_p=0.9,
-                repetition_penalty=1.1,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                repetition_penalty=self.repetition_penalty,
                 pad_token_id=self._tokenizer.eos_token_id,
             )
             response = self._tokenizer.decode(
@@ -84,10 +90,16 @@ class DialogueModel:
             )
             result_chunks.append(response)
 
-        thread = Thread(target=_run)
+        thread = threading.Thread(target=_run)
         thread.start()
         thread.join()
 
+        # NOTE (C-7, unresolved): this is not real streaming. The whole generation
+        # completes before the first chunk is yielded, and `yield from` a string
+        # emits one character at a time. Fixing it needs an incremental token
+        # stream, but the pinned transformers (4.32.1, see environment.yml) does not
+        # provide one: its TextIteratorStreamer buffers and flushes only at end().
+        # See docs/PROJECT_REVIEW_REPORT.md.
         full_text = "".join(result_chunks)
         yield from full_text
 
