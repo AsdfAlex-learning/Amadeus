@@ -158,6 +158,11 @@ def train(
         optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
     )
 
+    # C-3 fix: the AMP scaler must exist *before* the resume block below, which
+    # restores its state. It used to be constructed after that block, so any
+    # resume from a full snapshot raised UnboundLocalError on `scaler`.
+    scaler = torch.amp.GradScaler(device) if use_amp and device == "cuda" else None
+
     # L4 fix: restore optimizer / scheduler / scaler state if resuming from a
     # full snapshot. Must run AFTER these objects are constructed.
     if _resume_state is not None:
@@ -190,7 +195,6 @@ def train(
                 logger.warning(f"Could not restore EMA state: {e}")
         logger.info(f"EMA enabled (decay={ema_decay})")
     criterion = nn.MSELoss()
-    scaler = torch.amp.GradScaler(device) if use_amp and device == "cuda" else None
 
     model.train()
     # L3 fix: track best validation loss for early stopping.
