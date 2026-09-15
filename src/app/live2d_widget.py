@@ -3,7 +3,7 @@ from collections import deque
 from loguru import logger
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QSurfaceFormat
-from PySide6.QtWidgets import QOpenGLWidget
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from src.live2d.renderer import Live2DRenderer
 
