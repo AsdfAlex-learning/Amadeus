@@ -215,6 +215,14 @@ class DiffusionMotionInference:
             np.asarray(audio, dtype=np.float32), source_rate, self.sample_rate
         )
         self._tts_buffer.extend(resampled.tolist())
+        # C-6: TTS must be able to advance the engine on its own. Without this,
+        # inference only ever ran from the microphone callback, so the character
+        # stood still for the entire spoken response.
+        #
+        # NOTE (transitional): this runs inference on whichever thread delivered
+        # the speech. ADR 0003 Stage 2 moves ownership of inference to a dedicated
+        # MotionWorker and reduces this to publishing into a mail slot.
+        self._try_infer()
 
     @staticmethod
     def _resample_audio(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
@@ -237,12 +245,29 @@ class DiffusionMotionInference:
             self._visual_buffer.pop(0)
 
     def _try_infer(self):
+        """Run one inference step per available second of audio, from either input.
+
+        Speak state must advance on TTS audio alone. If a step were only produced
+        when a full *microphone* chunk existed, the character would freeze the
+        moment the user stopped talking - the engine is specified as always-on.
+        So a step runs when either input has a chunk, and the absent side is fed
+        zeros, which is precisely the model's Speak (user_audio=0) and Listen
+        (tts_audio=0) conditioning. (C-6)
+        """
         chunk_samples = int(self.chunk_size * self.sample_rate)
-        while len(self._audio_buffer) >= chunk_samples:
-            user_chunk = np.array(
-                [self._audio_buffer.popleft() for _ in range(chunk_samples)],
-                dtype=np.float32,
-            )
+        while True:
+            has_user = len(self._audio_buffer) >= chunk_samples
+            has_tts = len(self._tts_buffer) >= chunk_samples
+            if not has_user and not has_tts:
+                break
+
+            user_chunk = np.zeros(chunk_samples, dtype=np.float32)
+            if has_user:
+                user_chunk = np.array(
+                    [self._audio_buffer.popleft() for _ in range(chunk_samples)],
+                    dtype=np.float32,
+                )
+
             tts_len = min(len(self._tts_buffer), chunk_samples)
             tts_chunk = np.zeros(chunk_samples, dtype=np.float32)
             if tts_len > 0:

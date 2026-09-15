@@ -127,11 +127,16 @@ def test_tts_audio_alone_drives_motion_inference(config: dict) -> None:
     Speak state is driven by TTS audio. If feeding TTS audio does not advance
     the model, motion depends entirely on the microphone callback — so the
     character freezes the instant the user stops talking.
+
+    Note this feeds one second *at the TTS rate*, not ``CHUNK_SAMPLES``: TTS
+    audio is resampled to the pipeline rate on ingest (C-5), so 16000 samples
+    declared as 22050 Hz audio is only ~0.73 s of speech.
     """
     steps: list[int] = []
     engine = _stubbed_engine(config, lambda *_a, **_k: (steps.append(1), None)[1])
 
-    engine.process_tts_audio(np.zeros(CHUNK_SAMPLES, dtype=np.float32))
+    one_second_of_tts = int(config["tts"]["sample_rate"])
+    engine.process_tts_audio(np.zeros(one_second_of_tts, dtype=np.float32))
 
     assert steps, (
         "feeding 1 s of TTS audio produced no inference step: Speak state cannot "
