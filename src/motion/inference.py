@@ -428,6 +428,17 @@ class DiffusionMotionInference:
         """True while an utterance is being performed (the model's Speak state)."""
         return self._speech is not None
 
+    def supersede_speech(self) -> None:
+        """Drop the active utterance and any pending one (interruption).
+
+        The engine then falls back to Listen/Silence rather than continuing to
+        perform audio the user has stopped hearing. The next utterance is picked
+        up from the pending slot as usual.
+        """
+        self._speech = None
+        self._speech_inferred = 0
+        self._tts_pending.clear()
+
     @property
     def speech_skipped_samples(self) -> int:
         """Samples skipped to bound the lag behind playback."""

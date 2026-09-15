@@ -25,7 +25,9 @@ class _PipelineBridge(QObject):
     text_received = Signal(str)
     state_changed = Signal(int)
     response_chunk = Signal(str)
-    response_done = Signal()
+    # Carries the generation id: a superseded generation's completion must not be
+    # confused with the current one's.
+    response_done = Signal(int)
 
 
 class AmadeusWindow(QMainWindow):
@@ -46,10 +48,14 @@ class AmadeusWindow(QMainWindow):
         )
         self._bridge = _PipelineBridge()
         self._generating = False
-        # The generation thread handle is kept so shutdown can join it; the event
-        # lets an in-flight generation stop between streamed chunks.
+        # Each generation gets its own id. One shared cancel Event is not enough:
+        # cancelling generation N would also abort generation N+1, which starts
+        # immediately afterwards and would still see the flag set - so the
+        # interrupting utterance would get no reply at all.
+        self._generation_id = 0
+        self._cancelled_generations: set[int] = set()
+        self._shutting_down = False
         self._generation_thread: threading.Thread | None = None
-        self._gen_cancel = threading.Event()
         # T7: owns the output stream and publishes playback position. It creates
         # its own PyAudio instance, so no shared instance is raced by concurrent
         # generation threads.
@@ -122,6 +128,10 @@ class AmadeusWindow(QMainWindow):
     def _connect_pipeline(self):
         self.audio_pipeline.on_text(self._on_text)
         self.audio_pipeline.on_state_change(self._on_pipeline_state)
+        # Interruption triggers on the VAD onset, not on the transcript: waiting
+        # for the transcript would leave the character talking over the user for
+        # the whole utterance.
+        self.audio_pipeline.on_speech_onset(self._interrupt_speech)
         self._bridge.text_received.connect(self._handle_text)
         self._bridge.state_changed.connect(self._handle_state)
         self._bridge.response_chunk.connect(self._append_response)
@@ -179,31 +189,51 @@ class AmadeusWindow(QMainWindow):
         # down, otherwise a generation thread inside a blocking stream.write()
         # races PyAudio.terminate(). That is PortAudio use-after-terminate, which
         # is a native crash rather than a Python exception.
+        self._generation_id += 1
+        generation_id = self._generation_id
         self._generation_thread = threading.Thread(
-            target=self._run_generation, daemon=True, name="amadeus-generation"
+            target=self._run_generation,
+            args=(generation_id,),
+            daemon=True,
+            name="amadeus-generation",
         )
         self._generation_thread.start()
 
-    def _run_generation(self):
+    def _is_generation_cancelled(self, generation_id: int) -> bool:
+        return self._shutting_down or generation_id in self._cancelled_generations
+
+    def _cancel_generation(self, generation_id: int | None = None) -> None:
+        """Cancel one generation, leaving any later one untouched."""
+        target = self._generation_id if generation_id is None else generation_id
+        if target > 0:
+            self._cancelled_generations.add(target)
+        if len(self._cancelled_generations) > 64:
+            # Only the newest id can still be in flight.
+            self._cancelled_generations = {max(self._cancelled_generations)}
+
+    def _run_generation(self, generation_id: int):
         messages = [{"role": "system", "content": self.persona.format_prompt([])}]
         messages.extend(self.context.get_messages())
         full_response = ""
         try:
             for chunk in self.dialogue_model.generate(messages):
-                if self._gen_cancel.is_set():
-                    break  # shutdown asked us to stop between chunks
+                if self._is_generation_cancelled(generation_id):
+                    break  # superseded, interrupted, or shutting down
                 full_response += chunk
                 self._bridge.response_chunk.emit(chunk)
         except Exception as e:
             logger.error(f"Generation error: {e}")
             self._bridge.response_chunk.emit("（抱歉，出了点问题...）")
         finally:
+            # A truncated turn is KEPT: the user already heard part of it, and
+            # deleting it would make the next reply reference a statement the
+            # model believes it never made.
             self.context.add_assistant_message(full_response)
-            self._bridge.response_done.emit()
+            self._bridge.response_done.emit(generation_id)
             if (
                 self.tts_engine.is_loaded
                 and full_response.strip()
-                and not self._gen_cancel.is_set()
+                and not self._is_generation_cancelled(generation_id)
             ):
                 self._speak_response(full_response)
 
@@ -214,7 +244,14 @@ class AmadeusWindow(QMainWindow):
         scrollbar = self.conversation_display.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    def _on_response_done(self):
+    def _on_response_done(self, generation_id: int):
+        # A superseded generation's completion must not clear the flag that now
+        # belongs to its replacement. Doing so would let a third utterance spawn a
+        # third concurrent generation sharing playback and the conversation
+        # context - and the replacement's reply would never see the partial it
+        # superseded.
+        if generation_id != self._generation_id:
+            return
         self._generating = False
         state_label = "● 聆听中..." if self.audio_pipeline.state != PipelineState.IDLE else "● 就绪"
         self.status_label.setText(state_label)
@@ -267,12 +304,29 @@ class AmadeusWindow(QMainWindow):
             self.audio_pipeline.stop()
             self.camera.stop()
 
+    def _interrupt_speech(self):
+        """React to the user speaking while the character is talking.
+
+        Only the *reaction* can start now: the transcript is seconds away (VAD
+        silence window plus Whisper), so this stops playback, drops the active
+        utterance so the engine falls back to Listen, and cancels the in-flight
+        generation. The replacement reply follows when the transcript arrives,
+        which `_handle_text` starts in the usual way.
+        """
+        if self._shutting_down:
+            return
+        self._playback.stop_and_flush()
+        self.motion_model.supersede_speech()
+        self._cancel_generation()
+        self._generating = False
+
     def closeEvent(self, event):
         logger.info("Shutting down Amadeus...")
-        # Order matters: stop accepting work, join every worker, then release
-        # resources. The generation thread must be joined BEFORE PyAudio is
-        # terminated, because it may be inside a blocking stream.write().
-        self._gen_cancel.set()
+        # Stop accepting work, cancel and join every worker, then release
+        # resources. The generation thread must be joined BEFORE playback is torn
+        # down, because it is the thread that submits audio to it.
+        self._shutting_down = True
+        self._cancel_generation()
         self._join_generation_thread()
         # T7 is stopped after the generation thread is joined (T5 is what submits
         # audio to it) and before the motion engine and renderer are released.

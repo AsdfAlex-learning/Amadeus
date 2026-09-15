@@ -48,6 +48,7 @@ class AudioPipeline:
         self._text_callbacks: list[Callable[[str], None]] = []
         self._state_callbacks: list[Callable[[PipelineState], None]] = []
         self._audio_callbacks: list[Callable[[np.ndarray], None]] = []
+        self._onset_callbacks: list[Callable[[], None]] = []
 
         self._audio_buffer: list[np.ndarray] = []
         self._pre_speech_buffer: deque[np.ndarray] = deque(
@@ -88,6 +89,7 @@ class AudioPipeline:
         self._text_callbacks.clear()
         self._state_callbacks.clear()
         self._audio_callbacks.clear()
+        self._onset_callbacks.clear()
 
     # ── registration ─────────────────────────────────────────────────────────
 
@@ -96,6 +98,15 @@ class AudioPipeline:
 
     def on_state_change(self, callback: Callable[[PipelineState], None]):
         self._state_callbacks.append(callback)
+
+    def on_speech_onset(self, callback: Callable[[], None]):
+        """Called when the VAD transitions from silence to speech.
+
+        Interruption needs the *onset*: the transcript does not exist for another
+        second or more (VAD silence window plus transcription), and waiting for it
+        would leave playback running through the user's whole utterance.
+        """
+        self._onset_callbacks.append(callback)
 
     def on_raw_audio(self, callback: Callable[[np.ndarray], None]):
         """Register a raw-audio consumer.
@@ -128,6 +139,7 @@ class AudioPipeline:
                 # is not clipped. Appending again here would duplicate the chunk.
                 self._audio_buffer.extend(self._pre_speech_buffer)
                 self._pre_speech_buffer.clear()
+                self._notify_speech_onset()
             else:
                 self._audio_buffer.append(audio)
             self._silence_counter = 0
@@ -140,6 +152,13 @@ class AudioPipeline:
             silence_sec = self._silence_counter * len(audio) / self.capture.sample_rate
             if silence_sec >= self.SILENCE_DURATION:
                 self._finalize_utterance()
+
+    def _notify_speech_onset(self):
+        for callback in list(self._onset_callbacks):
+            try:
+                callback()
+            except Exception as e:
+                logger.error(f"Speech onset callback error: {e}")
 
     def _finalize_utterance(self):
         """Hand the completed utterance to the ASR worker.
