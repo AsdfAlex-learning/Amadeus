@@ -15,6 +15,11 @@ class DiffusionMotionInference:
         self.num_params = int(motion_cfg["output_params"])
         self.chunk_size = float(motion_cfg["chunk_size"])
         self.sample_rate = config["audio"]["sample_rate"]
+        # C-5: TTS synthesises at its own rate (config tts.sample_rate, 22050 by
+        # default) while this engine consumes at self.sample_rate (16000). Feeding
+        # one as though it were the other compresses speech by ~1.38x, so TTS audio
+        # is resampled to the pipeline rate once, at ingest.
+        self._tts_sample_rate = int(config.get("tts", {}).get("sample_rate", self.sample_rate))
         self.model_path = Path(motion_cfg.get("model_path", "models/motion"))
         self.num_inference_steps = int(motion_cfg.get("num_inference_steps", 4))
         self.diffusion_beta_start = float(motion_cfg.get("diffusion_beta_start", 1e-4))
@@ -196,10 +201,35 @@ class DiffusionMotionInference:
         self._audio_buffer.extend(audio.tolist())
         self._try_infer()
 
-    def process_tts_audio(self, audio: np.ndarray):
+    def process_tts_audio(self, audio: np.ndarray, sample_rate: int | None = None):
+        """Buffer synthesized speech for the Speak state, at the pipeline rate.
+
+        ``sample_rate`` defaults to the configured TTS rate. Callers should pass
+        it explicitly when the backend's true rate differs from
+        ``config.tts.sample_rate``; otherwise the duration is silently wrong.
+        """
         if not self._loaded or self._model is None:
             return
-        self._tts_buffer.extend(audio.tolist())
+        source_rate = int(sample_rate) if sample_rate is not None else self._tts_sample_rate
+        resampled = self._resample_audio(
+            np.asarray(audio, dtype=np.float32), source_rate, self.sample_rate
+        )
+        self._tts_buffer.extend(resampled.tolist())
+
+    @staticmethod
+    def _resample_audio(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+        """Linear resample of a mono float32 signal from ``src_rate`` to ``dst_rate``.
+
+        Naive linear interpolation is adequate here: the result drives mouth
+        motion, not playback (playback uses the original audio at its native rate).
+        """
+        if audio.size == 0 or src_rate == dst_rate:
+            return audio
+        duration = audio.size / float(src_rate)
+        dst_count = max(1, int(round(duration * dst_rate)))
+        src_positions = np.linspace(0.0, duration, num=audio.size, endpoint=False)
+        dst_positions = np.linspace(0.0, duration, num=dst_count, endpoint=False)
+        return np.interp(dst_positions, src_positions, audio).astype(np.float32)
 
     def process_visual_frame(self, frame: np.ndarray):
         self._visual_buffer.append(frame)
