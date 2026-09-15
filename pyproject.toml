@@ -61,3 +61,9 @@ skip-magic-trailing-comma = false
 [tool.black]
 line-length = 100
 target-version = ["py311"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The runtime contract tests are deliberately RED until the P0 fixes land;
+# see docs/PROJECT_REVIEW_REPORT.md.
+addopts = "-ra"
