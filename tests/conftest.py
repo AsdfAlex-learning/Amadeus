@@ -77,3 +77,17 @@ def config() -> dict:
     from src.config import load_config
 
     return load_config(PROJECT_ROOT / "config" / "default.yaml")
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    """A single offscreen QApplication for the session.
+
+    Qt allows only one QApplication per process, so this is session-scoped.
+    ``QT_QPA_PLATFORM=offscreen`` is set at import time above, so no display is
+    required.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    yield app

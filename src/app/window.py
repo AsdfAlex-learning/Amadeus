@@ -1,5 +1,4 @@
-from threading import Thread
-
+import threading
 from loguru import logger
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QFont
@@ -29,6 +28,9 @@ class _PipelineBridge(QObject):
 
 
 class AmadeusWindow(QMainWindow):
+    #: How long to wait for the per-utterance generation thread at shutdown.
+    GENERATION_JOIN_TIMEOUT_S = 5.0
+
     def __init__(self, config: dict):
         super().__init__()
         self.config = config
@@ -44,6 +46,10 @@ class AmadeusWindow(QMainWindow):
         self._bridge = _PipelineBridge()
         self._generating = False
         self._pyaudio = None
+        # The generation thread handle is kept so shutdown can join it; the event
+        # lets an in-flight generation stop between streamed chunks.
+        self._generation_thread: threading.Thread | None = None
+        self._gen_cancel = threading.Event()
         self._setup_window()
         self._setup_ui()
         self._connect_pipeline()
@@ -157,7 +163,14 @@ class AmadeusWindow(QMainWindow):
         self.conversation_display.append(
             f"<span style='color:#d94a90'><b>{self.persona.name}:</b> </span>"
         )
-        Thread(target=self._run_generation, daemon=True).start()
+        # Keep the handle: shutdown must join this thread before PortAudio is torn
+        # down, otherwise a generation thread inside a blocking stream.write()
+        # races PyAudio.terminate(). That is PortAudio use-after-terminate, which
+        # is a native crash rather than a Python exception.
+        self._generation_thread = threading.Thread(
+            target=self._run_generation, daemon=True, name="amadeus-generation"
+        )
+        self._generation_thread.start()
 
     def _run_generation(self):
         messages = [{"role": "system", "content": self.persona.format_prompt([])}]
@@ -165,6 +178,8 @@ class AmadeusWindow(QMainWindow):
         full_response = ""
         try:
             for chunk in self.dialogue_model.generate(messages):
+                if self._gen_cancel.is_set():
+                    break  # shutdown asked us to stop between chunks
                 full_response += chunk
                 self._bridge.response_chunk.emit(chunk)
         except Exception as e:
@@ -173,7 +188,11 @@ class AmadeusWindow(QMainWindow):
         finally:
             self.context.add_assistant_message(full_response)
             self._bridge.response_done.emit()
-            if self.tts_engine.is_loaded and full_response.strip():
+            if (
+                self.tts_engine.is_loaded
+                and full_response.strip()
+                and not self._gen_cancel.is_set()
+            ):
                 self._speak_response(full_response)
 
     def _append_response(self, text: str):
@@ -244,10 +263,32 @@ class AmadeusWindow(QMainWindow):
 
     def closeEvent(self, event):
         logger.info("Shutting down Amadeus...")
+        # Order matters: stop accepting work, join every worker, then release
+        # resources. The generation thread must be joined BEFORE PyAudio is
+        # terminated, because it may be inside a blocking stream.write().
+        self._gen_cancel.set()
+        self._join_generation_thread()
         self.camera.cleanup()
         self.audio_pipeline.cleanup()
         self.motion_model.cleanup()
         self.live2d_widget.cleanup()
         if self._pyaudio is not None:
             self._pyaudio.terminate()
+            self._pyaudio = None
         super().closeEvent(event)
+
+    def _join_generation_thread(self):
+        thread, self._generation_thread = self._generation_thread, None
+        if thread is None:
+            return
+        thread.join(timeout=self.GENERATION_JOIN_TIMEOUT_S)
+        if thread.is_alive():
+            # Escalation policy (ADR 0003): the local-transformers path runs the
+            # whole generation inside one blocking model.generate call, so it
+            # cannot honour cancellation between chunks. Leak the daemon rather
+            # than release resources it may still be using.
+            logger.warning(
+                "Generation thread did not stop within %.0f s; leaking it (daemon)",
+                self.GENERATION_JOIN_TIMEOUT_S,
+            )
+            self._generation_thread = thread
