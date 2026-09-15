@@ -236,17 +236,26 @@ class DiffusionMotionInference:
                 self._emit_params(params)
 
     def _prepare_visual_frames(self, audio_samples: int) -> np.ndarray:
+        """Return camera frames as ``(T, C, H, W)`` float32.
+
+        The model's ``VisualEncoder`` unpacks ``(B, T, C, H, W)`` and training
+        feeds ``(B, 5, 3, 224, 224)``, but ``CameraPerception`` delivers frames as
+        HWC ``(224, 224, 3)``. This is the single boundary where that conversion
+        belongs, so the empty and populated paths agree on layout. (C-4)
+        """
         num_visual = min(len(self._visual_buffer), 5)
         if num_visual == 0:
             return np.zeros((1, 3, 224, 224), dtype=np.float32)
+
         if num_visual < 5:
-            frames = []
-            for i in range(5):
-                idx = int(i * num_visual / 5)
-                frames.append(self._visual_buffer[idx])
-            return np.stack(frames)
-        step = max(1, num_visual // 5)
-        return np.stack([self._visual_buffer[i] for i in range(0, num_visual, step)][:5])
+            indices = [int(i * num_visual / 5) for i in range(5)]
+        else:
+            step = max(1, num_visual // 5)
+            indices = list(range(0, num_visual, step))[:5]
+
+        # (T, H, W, C) as supplied by CameraPerception -> (T, C, H, W)
+        frames_hwc = np.stack([self._visual_buffer[i] for i in indices])
+        return np.ascontiguousarray(frames_hwc.transpose(0, 3, 1, 2))
 
     def _diffusion_infer(
         self, user_audio: np.ndarray, tts_audio: np.ndarray, visual_frames: np.ndarray
