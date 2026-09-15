@@ -434,10 +434,11 @@ class DiffusionMotionInference:
 
             B = 1
             # Derive T from the audio encoder output length instead of hardcoding
-            # (M3 fix). This keeps inference aligned with variable-length audio.
-            with torch.no_grad():
-                audio_feat = self._model.audio_encoder(user_wav)
-            T = audio_feat.shape[1]
+            # (M3 fix). Keep the encoding and hand it to the forward pass: it needs
+            # the same features, so recomputing them would be a full extra Hubert
+            # pass per DDIM step.
+            listen_feat = self._model.audio_proj(self._model.audio_encoder(user_wav))
+            T = listen_feat.shape[1]
             x = torch.randn(B, T, self.num_params, device=self._device)
 
             # X-prediction DDIM sampling.
@@ -454,7 +455,10 @@ class DiffusionMotionInference:
                 t_next = timesteps[i + 1]
                 t_tensor = t.unsqueeze(0).expand(B)
                 alpha_t = torch.tensor(self._alphas_cumprod[t], device=self._device)
-                pred_x0 = self._model(user_wav, tts_wav, vis, prompts, id_tensor, t_tensor, x)
+                pred_x0 = self._model(
+                    user_wav, tts_wav, vis, prompts, id_tensor, t_tensor, x,
+                    listen_feat=listen_feat,
+                )
                 sqrt_alpha_t = torch.sqrt(alpha_t)
                 sqrt_one_minus_alpha_t = torch.sqrt(1.0 - alpha_t)
                 pred_eps = (x - sqrt_alpha_t * pred_x0) / sqrt_one_minus_alpha_t

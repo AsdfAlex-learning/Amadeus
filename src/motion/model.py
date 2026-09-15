@@ -405,12 +405,19 @@ class FullDuplexDiT(nn.Module):
         identity_ids: torch.Tensor,
         timesteps: torch.Tensor,
         noisy_params: torch.Tensor,
+        listen_feat: torch.Tensor | None = None,
     ) -> torch.Tensor:
         B, T, P = noisy_params.shape
         device = noisy_params.device
 
         # ── Encode all modalities ──
-        listen_feat = self.audio_proj(self.audio_encoder(user_audio))
+        # ``listen_feat`` is an optional precomputed encoding of ``user_audio``.
+        # Inference must know the encoder's output length (T) before it can size
+        # the latent, and the encoder is the costly part of a step, so it encodes
+        # once and passes the result in. Without this the same waveform was encoded
+        # twice per step - a full Hubert pass per chunk that bought nothing.
+        if listen_feat is None:
+            listen_feat = self.audio_proj(self.audio_encoder(user_audio))
         speak_feat = self.audio_proj(self.audio_encoder(tts_audio))
         visual_feat = self.visual_encoder(visual_frames)
         text_feat = self.text_encoder(text_prompts, device).unsqueeze(1).expand(-1, T, -1)
