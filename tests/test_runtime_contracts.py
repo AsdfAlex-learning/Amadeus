@@ -95,26 +95,34 @@ def test_visual_layout_agrees_with_and_without_camera(config: dict) -> None:
 
 
 def test_one_second_of_tts_audio_occupies_one_second_of_motion_time(config: dict) -> None:
-    """TTS audio must be buffered at the rate the motion engine consumes it.
+    """TTS audio must be resampled to the rate the motion engine consumes it at.
 
-    The engine consumes ``chunk_size`` seconds of audio per inference step,
-    counting at ``config['audio']['sample_rate']``. TTS synthesises at
+    The engine consumes ``chunk_size`` seconds per inference step counting at
+    ``config['audio']['sample_rate']``, while TTS synthesises at
     ``config['tts']['sample_rate']``. If the two differ, the character's mouth
     moves at the wrong speed relative to the speech.
+
+    Playback is attached with nothing played and no lookahead, so the utterance is
+    retained un-consumed and its resampled length can be measured directly.
     """
+
+    class _IdlePlayback:
+        played_samples = 0
+
     engine = _stubbed_engine(config, lambda *_a, **_k: None)
+    engine.attach_playback(_IdlePlayback(), playback_rate=int(config["tts"]["sample_rate"]))
+    engine.SPEECH_LOOKAHEAD_SECONDS = 0.0  # nothing may be inferred yet
 
     tts_rate = int(config["tts"]["sample_rate"])
     motion_rate = int(engine.sample_rate)
-
     engine.process_tts_audio(np.zeros(tts_rate, dtype=np.float32))  # exactly 1 s of speech
-    engine.process_user_audio(np.zeros(motion_rate, dtype=np.float32))  # exactly 1 s of motion
 
-    remaining = len(engine._tts_buffer)
-    assert remaining == 0, (
-        f"{tts_rate} samples of TTS audio (1 s at the TTS rate) left {remaining} "
-        f"samples un-consumed after 1 s of motion time at {motion_rate} Hz — "
-        "TTS and the motion engine disagree on sample rate."
+    assert engine._speech is not None, "the utterance was not retained for the Speak state"
+    _stream_id, audio = engine._speech
+    assert audio.size == motion_rate, (
+        f"{tts_rate} samples of TTS audio (1 s at the TTS rate) became {audio.size} "
+        f"samples at the pipeline rate {motion_rate} Hz — TTS and the motion engine "
+        "disagree on sample rate."
     )
 
 

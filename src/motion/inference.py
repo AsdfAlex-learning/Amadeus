@@ -8,7 +8,7 @@ import torch
 from loguru import logger
 
 from src.motion.model import FullDuplexDiT
-from src.runtime.concurrency import BoundedDropOldest, FrameBuffer
+from src.runtime.concurrency import BoundedDropOldest, FrameBuffer, Mailbox
 
 
 class DiffusionMotionInference:
@@ -18,6 +18,13 @@ class DiffusionMotionInference:
     AUDIO_QUEUE_CAPACITY = 2
     #: Consecutive inference failures before the worker stops itself.
     MAX_CONSECUTIVE_FAILURES = 5
+    #: How far ahead of the playback position Speak state may infer. One chunk of
+    #: lookahead lets the first step fire before playback has advanced at all.
+    SPEECH_LOOKAHEAD_SECONDS = 1.0
+    #: If the cursor falls further than this behind playback, skip forward (and
+    #: count it). Without a bound the lag grows relative to the audio the user
+    #: actually hears, and the mouth animates audio that has already finished.
+    DEFAULT_MAX_SPEECH_LAG_SECONDS = 1.5
     _WORKER_JOIN_TIMEOUT_S = 2.0
     _WORKER_POLL_S = 0.1
 
@@ -71,7 +78,22 @@ class DiffusionMotionInference:
         self._loaded = False
         self._param_callbacks: list[Callable[[dict[str, float]], None]] = []
         self._audio_buffer: deque[float] = deque()
-        self._tts_buffer: deque[float] = deque()
+        # Speak state (S2.4). The current utterance is RETAINED and read through a
+        # cursor owned by this (the motion) side; it is not drained from a queue and
+        # discarded, because a position-indexed read needs the audio to still exist.
+        self._speech: tuple[int, np.ndarray] | None = None
+        self._speech_inferred = 0
+        self._speech_skipped = 0
+        self._speech_seq = 0
+        # Single slot: a new utterance supersedes a *pending* one, never the one
+        # already being read (dropping the active stream would jump mid-utterance).
+        self._tts_pending: Mailbox[tuple[int, np.ndarray]] = Mailbox()
+        # Playback clock (T7). Optional: without it the gate opens at the cursor.
+        self._playback = None
+        self._playback_rate = self._tts_sample_rate
+        self._max_lag_s = float(
+            motion_cfg.get("max_speech_lag_seconds", self.DEFAULT_MAX_SPEECH_LAG_SECONDS)
+        )
         # Thread-safe: written by the camera thread, read by the motion worker.
         # A plain list was shared between them, so the writer's prune raced the
         # reader's indexed snapshot. (S2.2)
@@ -255,7 +277,11 @@ class DiffusionMotionInference:
         resampled = self._resample_audio(
             np.asarray(audio, dtype=np.float32), source_rate, self.sample_rate
         )
-        self._tts_buffer.extend(resampled.tolist())
+        # Publish as a *retained* stream, already at the pipeline rate, so the
+        # reader never has to mix sample rates. A single slot: a newer utterance
+        # supersedes a pending one, never the one currently being read. (S2.4)
+        self._speech_seq += 1
+        self._tts_pending.put((self._speech_seq, resampled))
         # C-6: TTS must be able to advance the engine on its own, otherwise the
         # character stands still for the whole spoken response.
         if self._motion_worker is not None:
@@ -331,6 +357,82 @@ class DiffusionMotionInference:
             else:
                 self._consecutive_failures = 0
 
+    # ── Speak-state clock (S2.4) ─────────────────────────────────────────────
+
+    def attach_playback(self, playback, playback_rate: int | None = None) -> None:
+        """Attach the playback worker (T7) so Speak state can follow the audio.
+
+        `playback_rate` is the rate at which ``played_samples`` is counted; the
+        position is converted to the pipeline rate here, so the two rates can
+        never be mixed (the C-5 bug class).
+        """
+        self._playback = playback
+        if playback_rate is not None:
+            self._playback_rate = int(playback_rate)
+
+    def _played_pipeline_samples(self) -> int:
+        if self._playback is None:
+            # No clock attached: behave as before, with the gate opening at the cursor.
+            return self._speech_inferred
+        played = int(self._playback.played_samples)
+        return int(played * self.sample_rate / max(self._playback_rate, 1))
+
+    def _speech_ready(self) -> bool:
+        """Promote a pending utterance and report whether one chunk may be inferred.
+
+        Playback *gates* the advance rather than *indexing* it: reading at the
+        playback position would skip every window between this cursor and
+        playback, which is the mid-utterance skip the design exists to avoid.
+        """
+        chunk_samples = int(self.chunk_size * self.sample_rate)
+
+        if self._speech is None:
+            promoted = self._tts_pending.get()
+            if promoted is None:
+                return False
+            self._speech = promoted
+            self._speech_inferred = 0
+            logger.debug(f"Speak state started for stream {promoted[0]}")
+
+        _stream_id, audio = self._speech
+        total = int(audio.size)
+        if self._speech_inferred >= total:
+            self._speech = None
+            return False
+
+        played = self._played_pipeline_samples()
+        max_lag = int(self._max_lag_s * self.sample_rate)
+        if played - self._speech_inferred > max_lag:
+            # Skip forward, and count it. Bounded lag relative to what the user
+            # hears is the point; unbounded lag would animate finished audio.
+            target = max(0, played - max_lag)
+            self._speech_skipped += target - self._speech_inferred
+            self._speech_inferred = target
+
+        lookahead = int(self.SPEECH_LOOKAHEAD_SECONDS * self.sample_rate)
+        gate = min(played + lookahead, total)
+        return self._speech_inferred + chunk_samples <= gate
+
+    def _pop_speech_chunk(self, chunk_samples: int) -> np.ndarray:
+        _stream_id, audio = self._speech
+        start = self._speech_inferred
+        end = start + chunk_samples
+        chunk = np.zeros(chunk_samples, dtype=np.float32)
+        piece = audio[start:end]
+        chunk[: piece.size] = piece
+        self._speech_inferred = end
+        return chunk
+
+    @property
+    def speech_active(self) -> bool:
+        """True while an utterance is being performed (the model's Speak state)."""
+        return self._speech is not None
+
+    @property
+    def speech_skipped_samples(self) -> int:
+        """Samples skipped to bound the lag behind playback."""
+        return self._speech_skipped
+
     @staticmethod
     def _resample_audio(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
         """Linear resample of a mono float32 signal from ``src_rate`` to ``dst_rate``.
@@ -362,40 +464,41 @@ class DiffusionMotionInference:
         """
         chunk_samples = int(self.chunk_size * self.sample_rate)
         while True:
+            speaking = self._speech_ready()
             has_user = len(self._audio_buffer) >= chunk_samples
-            has_tts = len(self._tts_buffer) >= chunk_samples
-            if not has_user and not has_tts:
+            if not speaking and not has_user:
                 break
 
-            user_chunk = np.zeros(chunk_samples, dtype=np.float32)
-            if has_user:
+            visual_frames = self._prepare_visual_frames(chunk_samples)
+
+            if speaking:
+                # Q2: during an active utterance the microphone is zeroed. That IS
+                # the model's Speak conditioning (user_audio = 0, tts_audio = speech);
+                # feeding both non-zero was a fourth state present in no spec.
+                user_chunk = np.zeros(chunk_samples, dtype=np.float32)
+                tts_chunk = self._pop_speech_chunk(chunk_samples)
+            else:
                 user_chunk = np.array(
                     [self._audio_buffer.popleft() for _ in range(chunk_samples)],
                     dtype=np.float32,
                 )
+                tts_chunk = np.zeros(chunk_samples, dtype=np.float32)
 
-            tts_len = min(len(self._tts_buffer), chunk_samples)
-            tts_chunk = np.zeros(chunk_samples, dtype=np.float32)
-            if tts_len > 0:
-                tts_chunk[:tts_len] = np.array(
-                    [self._tts_buffer.popleft() for _ in range(tts_len)], dtype=np.float32
-                )
-
-            visual_frames = self._prepare_visual_frames(chunk_samples)
-
-            if self._overlap > 0:
-                keep_n = int(self._overlap * self.sample_rate)
-                keep = [
-                    self._audio_buffer.popleft()
-                    for _ in range(min(keep_n, len(self._audio_buffer)))
-                ]
-                self._audio_buffer.extendleft(reversed(keep))
+                if self._overlap > 0:
+                    keep_n = int(self._overlap * self.sample_rate)
+                    keep = [
+                        self._audio_buffer.popleft()
+                        for _ in range(min(keep_n, len(self._audio_buffer)))
+                    ]
+                    self._audio_buffer.extendleft(reversed(keep))
 
             params = self._diffusion_infer(user_chunk, tts_chunk, visual_frames)
             if params is not None:
                 # C-8: per-persona multipliers are applied between the model and
-                # the renderer. Speak when TTS is present, otherwise Listen.
-                params = self._apply_performance(params, "speak" if has_tts else "listen")
+                # the renderer. Speak when speaking, otherwise Listen.
+                params = self._apply_performance(
+                    params, "speak" if speaking else "listen"
+                )
                 self._prev_params = params
                 self._emit_params(params)
 
@@ -527,7 +630,9 @@ class DiffusionMotionInference:
 
     def reset(self):
         self._audio_buffer.clear()
-        self._tts_buffer.clear()
+        self._speech = None
+        self._speech_inferred = 0
+        self._tts_pending.clear()
         self._visual_buffer.clear()
         self._prev_params = None
         if self._performance is not None:
@@ -539,7 +644,9 @@ class DiffusionMotionInference:
         self._loaded = False
         self._param_callbacks.clear()
         self._audio_buffer.clear()
-        self._tts_buffer.clear()
+        self._speech = None
+        self._speech_inferred = 0
+        self._tts_pending.clear()
         self._visual_buffer.clear()
         if self._performance is not None:
             self._performance.reset()

@@ -56,6 +56,12 @@ class AmadeusWindow(QMainWindow):
         self._playback = PlaybackWorker(int(config["tts"].get("sample_rate", 22050)))
         self._playback.start()
         self._stream_seq = 0
+        # Speak-state motion follows the audio the user actually hears (S2.4),
+        # rather than the inference cadence. The position is counted at the TTS
+        # rate and converted inside the engine.
+        self.motion_model.attach_playback(
+            self._playback, int(config["tts"].get("sample_rate", 22050))
+        )
         self._setup_window()
         self._setup_ui()
         self._connect_pipeline()
