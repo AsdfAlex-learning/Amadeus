@@ -121,6 +121,10 @@ class AmadeusWindow(QMainWindow):
         success = self.motion_model.load_model()
         if success:
             self.motion_model.on_params(self.live2d_widget.push_params)
+            # Stage 1.4: inference gets its own owner thread. Without this,
+            # process_user_audio runs inline on the capture drain worker and a
+            # 0.5-3 s forward pass stalls VAD for its duration.
+            self.motion_model.start_worker()
             self.audio_pipeline.on_raw_audio(self.motion_model.process_user_audio)
             logger.info("Motion model connected — unified full-duplex path active")
 

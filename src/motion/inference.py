@@ -1,3 +1,4 @@
+import threading
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
@@ -7,9 +8,19 @@ import torch
 from loguru import logger
 
 from src.motion.model import FullDuplexDiT
+from src.runtime.concurrency import BoundedDropOldest
 
 
 class DiffusionMotionInference:
+    #: Published microphone chunks awaiting inference. Bounded and drop-oldest:
+    #: a backlog of stale audio is worse than a gap, because it adds latency
+    #: without improving sync.
+    AUDIO_QUEUE_CAPACITY = 2
+    #: Consecutive inference failures before the worker stops itself.
+    MAX_CONSECUTIVE_FAILURES = 5
+    _WORKER_JOIN_TIMEOUT_S = 2.0
+    _WORKER_POLL_S = 0.1
+
     def __init__(self, config: dict):
         motion_cfg = config["motion"]
         self.num_params = int(motion_cfg["output_params"])
@@ -26,6 +37,16 @@ class DiffusionMotionInference:
         # instantiated it, so gesture_scale / expressiveness / react_speed /
         # mouth_open_max / head_motion_range / idle_energy had no effect at all.
         self._performance = self._build_performance_engine(config)
+
+        # Stage 1.4: inference gets an owner thread so it can never run on the
+        # capture drain worker, which must keep running VAD.
+        self._motion_worker: threading.Thread | None = None
+        self._worker_stop = threading.Event()
+        self._motion_wake = threading.Event()
+        self._audio_in_q: BoundedDropOldest[np.ndarray] = BoundedDropOldest(
+            self.AUDIO_QUEUE_CAPACITY
+        )
+        self._consecutive_failures = 0
         self.model_path = Path(motion_cfg.get("model_path", "models/motion"))
         self.num_inference_steps = int(motion_cfg.get("num_inference_steps", 4))
         self.diffusion_beta_start = float(motion_cfg.get("diffusion_beta_start", 1e-4))
@@ -204,6 +225,12 @@ class DiffusionMotionInference:
     def process_user_audio(self, audio: np.ndarray):
         if not self._loaded or self._model is None:
             return
+        if self._motion_worker is not None:
+            # The worker owns the audio buffer and inference; this thread only
+            # publishes. Runs on the capture drain worker, so it must stay fast.
+            self._audio_in_q.put(np.asarray(audio, dtype=np.float32))
+            self._motion_wake.set()
+            return
         self._audio_buffer.extend(audio.tolist())
         self._try_infer()
 
@@ -221,14 +248,80 @@ class DiffusionMotionInference:
             np.asarray(audio, dtype=np.float32), source_rate, self.sample_rate
         )
         self._tts_buffer.extend(resampled.tolist())
-        # C-6: TTS must be able to advance the engine on its own. Without this,
-        # inference only ever ran from the microphone callback, so the character
-        # stood still for the entire spoken response.
-        #
-        # NOTE (transitional): this runs inference on whichever thread delivered
-        # the speech. ADR 0003 Stage 2 moves ownership of inference to a dedicated
-        # MotionWorker and reduces this to publishing into a mail slot.
+        # C-6: TTS must be able to advance the engine on its own, otherwise the
+        # character stands still for the whole spoken response.
+        if self._motion_worker is not None:
+            self._motion_wake.set()
+            return
         self._try_infer()
+
+    # ── owner thread (ADR 0003 Stage 1.4) ────────────────────────────────────
+
+    def start_worker(self):
+        """Start the inference owner thread.
+
+        Once running, ``process_user_audio`` and ``process_tts_audio`` only
+        publish, and this thread becomes the sole mutator of the model and of
+        ``_audio_buffer`` / ``_tts_buffer``.
+        """
+        if self._motion_worker is not None and self._motion_worker.is_alive():
+            return
+        self._worker_stop.clear()
+        self._motion_worker = threading.Thread(
+            target=self._motion_loop, name="amadeus-motion", daemon=True
+        )
+        self._motion_worker.start()
+
+    def stop_worker(self):
+        worker, self._motion_worker = self._motion_worker, None
+        if worker is None:
+            return
+        self._worker_stop.set()
+        self._motion_wake.set()
+        worker.join(timeout=self._WORKER_JOIN_TIMEOUT_S)
+        if worker.is_alive():
+            # Escalation policy (ADR 0003): a 4-step DDIM pass can exceed the join
+            # timeout on CPU, so a timeout here is expected rather than exceptional.
+            # Leak the daemon instead of releasing a model it is still using.
+            logger.warning(
+                "Motion worker did not stop within %.0f s; leaking it (daemon)",
+                self._WORKER_JOIN_TIMEOUT_S,
+            )
+            self._motion_worker = worker
+        self._motion_wake.clear()
+
+    def _motion_loop(self):
+        """Sole consumer of the audio queue and sole caller of ``_try_infer``."""
+        while not self._worker_stop.is_set():
+            if not self._motion_wake.wait(timeout=self._WORKER_POLL_S):
+                continue
+            self._motion_wake.clear()
+            if self._worker_stop.is_set():
+                break
+
+            # The worker owns _audio_buffer, so published audio is folded in here.
+            while True:
+                item = self._audio_in_q.get_nowait()
+                if item is None:
+                    break
+                self._audio_buffer.extend(item.tolist())
+
+            try:
+                self._try_infer()
+            except Exception as e:
+                self._consecutive_failures += 1
+                logger.error(
+                    f"Motion inference failed "
+                    f"({self._consecutive_failures}/{self.MAX_CONSECUTIVE_FAILURES}): {e}"
+                )
+                if self._consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
+                    logger.error(
+                        "Motion inference failed repeatedly; stopping the worker so the "
+                        "failure is visible rather than silently disabling motion"
+                    )
+                    break
+            else:
+                self._consecutive_failures = 0
 
     @staticmethod
     def _resample_audio(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
@@ -430,6 +523,7 @@ class DiffusionMotionInference:
             self._performance.reset()
 
     def cleanup(self):
+        self.stop_worker()
         self._model = None
         self._loaded = False
         self._param_callbacks.clear()
