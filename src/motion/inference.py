@@ -386,6 +386,19 @@ class DiffusionMotionInference:
         """
         chunk_samples = int(self.chunk_size * self.sample_rate)
 
+        # Degradation (S2.6): if playback has given up, its position will never
+        # advance again, so a gated Speak state would stall forever and - combined
+        # with the renderer holding the last frame - freeze the character on its
+        # final pose. Drop the utterance so motion falls back to Listen/Silence.
+        if self._playback is not None and getattr(self._playback, "failed", False):
+            if self._speech is not None:
+                logger.warning(
+                    "Playback has failed; dropping the active utterance so motion "
+                    "falls back to Listen/Silence instead of holding its last frame"
+                )
+                self.supersede_speech()
+            return False
+
         if self._speech is None:
             promoted = self._tts_pending.get()
             if promoted is None:

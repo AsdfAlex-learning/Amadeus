@@ -337,6 +337,7 @@ class AmadeusWindow(QMainWindow):
         self.audio_pipeline.cleanup()
         self.motion_model.cleanup()
         self.live2d_widget.cleanup()
+        self.tts_engine.cleanup()
         super().closeEvent(event)
 
     def _join_generation_thread(self):

@@ -89,6 +89,7 @@ class PlaybackWorker:
         self._played = 0
         self._current_stream_id: int | None = None
         self._failures = 0
+        self._failed = False
         self._underruns = 0
 
     # ── lifecycle ────────────────────────────────────────────────────────────
@@ -157,6 +158,16 @@ class PlaybackWorker:
     def failures(self) -> int:
         return self._failures
 
+    @property
+    def failed(self) -> bool:
+        """True once the worker has given up, so consumers can stop waiting on it.
+
+        Without this, a dead playback worker freezes ``played_samples`` — and since
+        Speak-state motion is gated on that position, the character would hold its
+        last frame indefinitely.
+        """
+        return self._failed
+
     # ── worker ───────────────────────────────────────────────────────────────
 
     def _take_pending(self) -> tuple[int, np.ndarray] | None:
@@ -185,6 +196,7 @@ class PlaybackWorker:
                     f"Playback failed ({self._failures}/{self.MAX_CONSECUTIVE_FAILURES}): {e}"
                 )
                 if self._failures >= self.MAX_CONSECUTIVE_FAILURES:
+                    self._failed = True
                     logger.error(
                         "Playback failed repeatedly; stopping the worker so the fault "
                         "is visible instead of silently muting the character"

@@ -25,6 +25,10 @@ _WORKER_POLL_S = 0.1
 
 
 class MicrophoneCapture:
+    #: Stop the drain worker after this many consecutive failing chunks, rather
+    #: than logging the same error forever.
+    MAX_CONSECUTIVE_CALLBACK_FAILURES = 20
+
     def __init__(self, config: dict):
         audio_cfg = config["audio"]
         self.sample_rate = int(audio_cfg["sample_rate"])
@@ -138,6 +142,7 @@ class MicrophoneCapture:
         This is the thread that owns fan-out, so consumer latency can no longer
         affect the real-time callback.
         """
+        consecutive_failures = 0
         while not self._worker_stop.is_set():
             if not self._wake.wait(timeout=_WORKER_POLL_S):
                 continue
@@ -146,11 +151,24 @@ class MicrophoneCapture:
                 chunk = self._ring.read(self.chunk_size)
                 if chunk.size == 0:
                     break
+                failed = False
                 for callback in list(self._callbacks):
                     try:
                         callback(chunk)
                     except Exception as e:
+                        failed = True
                         logger.error(f"Audio callback error: {e}")
+                if failed:
+                    consecutive_failures += 1
+                    if consecutive_failures >= self.MAX_CONSECUTIVE_CALLBACK_FAILURES:
+                        logger.error(
+                            f"A consumer failed on {consecutive_failures} consecutive "
+                            f"chunks; stopping the audio drain worker so the fault is "
+                            f"visible instead of logging forever"
+                        )
+                        return
+                else:
+                    consecutive_failures = 0
             self._report_drops()
 
     def _report_drops(self):
