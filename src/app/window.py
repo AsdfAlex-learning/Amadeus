@@ -17,6 +17,7 @@ from src.dialogue.model import DialogueModel
 from src.dialogue.persona import Persona
 from src.motion.inference import DiffusionMotionInference
 from src.perception.camera import CameraPerception
+from src.runtime.playback import PlaybackWorker
 from src.tts.engine import TTSEngine
 
 
@@ -45,11 +46,16 @@ class AmadeusWindow(QMainWindow):
         )
         self._bridge = _PipelineBridge()
         self._generating = False
-        self._pyaudio = None
         # The generation thread handle is kept so shutdown can join it; the event
         # lets an in-flight generation stop between streamed chunks.
         self._generation_thread: threading.Thread | None = None
         self._gen_cancel = threading.Event()
+        # T7: owns the output stream and publishes playback position. It creates
+        # its own PyAudio instance, so no shared instance is raced by concurrent
+        # generation threads.
+        self._playback = PlaybackWorker(int(config["tts"].get("sample_rate", 22050)))
+        self._playback.start()
+        self._stream_seq = 0
         self._setup_window()
         self._setup_ui()
         self._connect_pipeline()
@@ -212,20 +218,14 @@ class AmadeusWindow(QMainWindow):
             audio_data = self.tts_engine.synthesize(text)
             if audio_data is None or len(audio_data) == 0:
                 return
+            # Feed the motion engine the spoken audio (its Speak conditioning).
             self.motion_model.process_tts_audio(audio_data)
-            import pyaudio
-
-            if self._pyaudio is None:
-                self._pyaudio = pyaudio.PyAudio()
-            stream = self._pyaudio.open(
-                format=pyaudio.paFloat32,
-                channels=1,
-                rate=self.tts_engine.sample_rate,
-                output=True,
-            )
-            stream.write(audio_data.tobytes())
-            stream.stop_stream()
-            stream.close()
+            # Playback runs on its own thread (T7) so that it can publish an
+            # incremental playback position and be interrupted. Previously this
+            # did one blocking stream.write() on the generation thread, which made
+            # the position visible only at the end and made interruption unsafe.
+            self._stream_seq += 1
+            self._playback.play(self._stream_seq, audio_data)
         except Exception as e:
             logger.error(f"TTS playback error: {e}")
 
@@ -268,13 +268,15 @@ class AmadeusWindow(QMainWindow):
         # terminated, because it may be inside a blocking stream.write().
         self._gen_cancel.set()
         self._join_generation_thread()
+        # T7 is stopped after the generation thread is joined (T5 is what submits
+        # audio to it) and before the motion engine and renderer are released.
+        # Its own stream and PyAudio instance are its responsibility to tear down,
+        # and it leaks rather than closing them if it cannot stop in time.
+        self._playback.shutdown()
         self.camera.cleanup()
         self.audio_pipeline.cleanup()
         self.motion_model.cleanup()
         self.live2d_widget.cleanup()
-        if self._pyaudio is not None:
-            self._pyaudio.terminate()
-            self._pyaudio = None
         super().closeEvent(event)
 
     def _join_generation_thread(self):

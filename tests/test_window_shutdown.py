@@ -22,16 +22,6 @@ from PySide6.QtGui import QCloseEvent
 from src.app.window import AmadeusWindow
 
 
-class _RecordingPyAudio:
-    """Stands in for ``pyaudio.PyAudio``, recording whether terminate() is safe."""
-
-    def __init__(self) -> None:
-        self.terminate_calls = 0
-
-    def terminate(self) -> None:
-        self.terminate_calls += 1
-
-
 @pytest.fixture
 def window(config: dict, qapp, monkeypatch):
     """An AmadeusWindow whose model loading is stubbed out.
@@ -77,38 +67,41 @@ def test_generation_thread_handle_is_retained(window, monkeypatch) -> None:
     window._generation_thread.join(timeout=5.0)
 
 
-def test_shutdown_joins_generation_before_terminating_pyaudio(window, monkeypatch) -> None:
-    """PyAudio must not be terminated while the generation thread is alive."""
-    recorder = _RecordingPyAudio()
-    window._pyaudio = recorder
+def test_shutdown_joins_generation_before_stopping_playback(window, monkeypatch) -> None:
+    """T7 must not be stopped while the generation thread is still running.
+
+    T5 is the thread that submits audio to playback, so tearing playback down first
+    would let a live generation publish into a worker that is being closed. This is
+    the same ordering requirement that previously applied to terminating PyAudio —
+    playback simply owns its own stream now.
+    """
     thread = _install_slow_generation(window, monkeypatch)
 
-    # Record whether the generation thread was still running at terminate() time.
-    alive_when_terminated: list[bool] = []
+    # Record whether the generation thread was still running when playback stopped.
+    alive_when_stopped: list[bool] = []
     monkeypatch.setattr(
-        recorder, "terminate", lambda: alive_when_terminated.append(thread.is_alive())
+        window._playback,
+        "shutdown",
+        lambda: alive_when_stopped.append(thread.is_alive()),
     )
 
     window.closeEvent(QCloseEvent())
 
     assert not thread.is_alive(), "shutdown left the generation thread running"
-    assert alive_when_terminated == [False], (
-        f"PyAudio was terminated while the generation thread was alive "
-        f"(observed {alive_when_terminated}); a thread inside stream.write() "
-        f"racing terminate() is a native crash"
+    assert alive_when_stopped == [False], (
+        f"playback was stopped while the generation thread was alive "
+        f"(observed {alive_when_stopped})"
     )
 
 
 def test_shutdown_is_idempotent(window, monkeypatch) -> None:
-    """A second close must not raise or re-terminate a released resource."""
-    recorder = _RecordingPyAudio()
-    window._pyaudio = recorder
+    """A second close must be safe, and must leave no worker running."""
     _install_slow_generation(window, monkeypatch)
+    worker = window._playback._thread
 
     window.closeEvent(QCloseEvent())
-    window.closeEvent(QCloseEvent())  # must be safe
+    window.closeEvent(QCloseEvent())  # must not raise
 
-    assert recorder.terminate_calls == 1, (
-        f"PyAudio terminated {recorder.terminate_calls} times; the reference must be "
-        f"cleared after the first teardown"
+    assert worker is not None and not worker.is_alive(), (
+        "the playback worker outlived a double shutdown"
     )
