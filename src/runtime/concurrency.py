@@ -23,6 +23,7 @@ blocks on contention.
 from __future__ import annotations
 
 import threading
+import time
 from collections import deque
 from typing import Generic, TypeVar
 
@@ -207,3 +208,69 @@ class AudioRing:
             out[first:] = self._buf[:take - first]
         self._read_total += take
         return out
+
+
+class FrameBuffer:
+    """Thread-safe bounded buffer of timestamped frames, read newest-first.
+
+    Written by the camera thread and read by the motion worker. A plain list
+    cannot be shared between them: the writer pruned with ``pop(0)`` while the
+    reader indexed a snapshot, so a read could raise ``IndexError`` or silently
+    pair the wrong frames with the current audio.
+
+    Frames are stamped at ingest and evicted by age, so a stalled camera does not
+    leave the model pairing a two-second-old frame with audio from now. This is
+    never on the real-time audio path, so a short-lived lock is acceptable.
+    """
+
+    __slots__ = ("_frames", "_capacity", "_max_age_s", "_dropped", "_lock")
+
+    def __init__(self, capacity: int = 10, max_age_s: float = 2.5) -> None:
+        if capacity <= 0:
+            raise ValueError("capacity must be positive")
+        self._frames: deque[tuple[float, np.ndarray]] = deque(maxlen=capacity)
+        self._capacity = int(capacity)
+        self._max_age_s = float(max_age_s)
+        self._dropped = 0
+        self._lock = threading.Lock()
+
+    def put(self, frame: np.ndarray, timestamp: float | None = None) -> None:
+        """Publish a frame, stamped at ingest."""
+        now = time.monotonic() if timestamp is None else float(timestamp)
+        with self._lock:
+            if len(self._frames) >= self._capacity:
+                self._dropped += 1
+            self._frames.append((now, frame))
+            self._evict_expired(now)
+
+    def _evict_expired(self, now: float) -> None:
+        while self._frames and (now - self._frames[0][0]) > self._max_age_s:
+            self._frames.popleft()
+
+    def snapshot(self, count: int, now: float | None = None) -> list[np.ndarray]:
+        """Return the newest ``count`` frames, oldest first."""
+        if count <= 0:
+            return []
+        current = time.monotonic() if now is None else float(now)
+        with self._lock:
+            self._evict_expired(current)
+            frames = [frame for _, frame in self._frames]
+        return frames[-count:]
+
+    def clear(self) -> None:
+        with self._lock:
+            self._frames.clear()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._frames)
+
+    @property
+    def capacity(self) -> int:
+        return self._capacity
+
+    @property
+    def dropped(self) -> int:
+        """Frames discarded because the buffer was full."""
+        with self._lock:
+            return self._dropped

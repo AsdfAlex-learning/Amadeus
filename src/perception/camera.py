@@ -1,5 +1,6 @@
 import math
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -14,11 +15,16 @@ class CameraPerception:
         self.enable_gaze = bool(perception_cfg.get("enable_gaze_estimation", True))
         self.enable_expression = bool(perception_cfg.get("enable_expression_recognition", True))
         self.device_index = perception_cfg.get("camera_device")
+        # The model consumes 5 frames per inference step (~1 Hz) and discards the
+        # rest, so capturing at the device rate wastes CPU on cvtColor/resize and
+        # (once perception is wired) FaceMesh. Gate at the source. (S2.2)
+        self.frame_fps = float(perception_cfg.get("fps", 4.0))
 
         self._cap = None
         self._running = False
         self._thread: threading.Thread | None = None
         self._face_mesh = None
+        self._last_published_at: float | None = None
         self._callbacks: list[Callable[[np.ndarray], None]] = []
         self._perception_callbacks: list[Callable[[dict[str, Any]], None]] = []
 
@@ -82,13 +88,33 @@ class CameraPerception:
         except ImportError:
             logger.warning("mediapipe not installed")
 
+    def _rate_gate(self, now: float) -> bool:
+        """Return True at most ``frame_fps`` times per second.
+
+        Time-based rather than frame-count-based: the device rate is unknown and
+        variable, so skipping every Nth frame would not produce a stable rate.
+        """
+        if self.frame_fps <= 0:
+            return True
+        interval = 1.0 / self.frame_fps
+        if self._last_published_at is not None and (now - self._last_published_at) < interval:
+            return False
+        self._last_published_at = now
+        return True
+
     def _capture_loop(self):
         import cv2
 
         while self._running and self._cap is not None:
             ret, frame = self._cap.read()
             if not ret:
+                # A failing device returns immediately; without a pause this is a
+                # hot spin that pegs a core.
+                time.sleep(0.01)
                 continue
+            if not self._rate_gate(time.monotonic()):
+                continue
+
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             resized = cv2.resize(frame_rgb, (224, 224))
             normalized = resized.astype(np.float32) / 255.0

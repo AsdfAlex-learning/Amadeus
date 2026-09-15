@@ -8,7 +8,7 @@ import torch
 from loguru import logger
 
 from src.motion.model import FullDuplexDiT
-from src.runtime.concurrency import BoundedDropOldest
+from src.runtime.concurrency import BoundedDropOldest, FrameBuffer
 
 
 class DiffusionMotionInference:
@@ -72,7 +72,15 @@ class DiffusionMotionInference:
         self._param_callbacks: list[Callable[[dict[str, float]], None]] = []
         self._audio_buffer: deque[float] = deque()
         self._tts_buffer: deque[float] = deque()
-        self._visual_buffer: list[np.ndarray] = []
+        # Thread-safe: written by the camera thread, read by the motion worker.
+        # A plain list was shared between them, so the writer's prune raced the
+        # reader's indexed snapshot. (S2.2)
+        perception_cfg = config.get("perception", {}) or {}
+        self._frame_fps = float(perception_cfg.get("fps", 4.0))
+        self._visual_buffer = FrameBuffer(
+            capacity=int(motion_cfg.get("visual_buffer_frames", 10)),
+            max_age_s=max(2.5, 5.0 / max(self._frame_fps, 1e-6)),
+        )
         self._overlap = 0.2
         self._prev_params: np.ndarray | None = None
         self._current_prompt = ""
@@ -339,9 +347,8 @@ class DiffusionMotionInference:
         return np.interp(dst_positions, src_positions, audio).astype(np.float32)
 
     def process_visual_frame(self, frame: np.ndarray):
-        self._visual_buffer.append(frame)
-        if len(self._visual_buffer) > 100:
-            self._visual_buffer.pop(0)
+        """Publish a camera frame. Called from the camera thread."""
+        self._visual_buffer.put(frame)
 
     def _try_infer(self):
         """Run one inference step per available second of audio, from either input.
@@ -393,25 +400,25 @@ class DiffusionMotionInference:
                 self._emit_params(params)
 
     def _prepare_visual_frames(self, audio_samples: int) -> np.ndarray:
-        """Return camera frames as ``(T, C, H, W)`` float32.
+        """Return camera frames as ``(T, C, H, W)`` float32, using the **newest** ones.
 
         The model's ``VisualEncoder`` unpacks ``(B, T, C, H, W)`` and training
         feeds ``(B, 5, 3, 224, 224)``, but ``CameraPerception`` delivers frames as
         HWC ``(224, 224, 3)``. This is the single boundary where that conversion
         belongs, so the empty and populated paths agree on layout. (C-4)
-        """
-        num_visual = min(len(self._visual_buffer), 5)
-        if num_visual == 0:
-            return np.zeros((1, 3, 224, 224), dtype=np.float32)
 
-        if num_visual < 5:
-            indices = [int(i * num_visual / 5) for i in range(5)]
-        else:
-            step = max(1, num_visual // 5)
-            indices = list(range(0, num_visual, step))[:5]
+        Taking the newest 5 matters: the previous implementation sampled across
+        the whole buffer with ``range(0, num, step)``, biasing the model toward
+        frames up to ~2 s old while pairing them with audio from *now*. (S2.2)
+        """
+        frames = self._visual_buffer.snapshot(5)
+        if not frames:
+            return np.zeros((1, 3, 224, 224), dtype=np.float32)
+        while len(frames) < 5:
+            frames.append(frames[-1])  # repeat the newest until the window is full
 
         # (T, H, W, C) as supplied by CameraPerception -> (T, C, H, W)
-        frames_hwc = np.stack([self._visual_buffer[i] for i in indices])
+        frames_hwc = np.stack(frames)
         return np.ascontiguousarray(frames_hwc.transpose(0, 3, 1, 2))
 
     def _diffusion_infer(
