@@ -6,7 +6,7 @@ Amadeus is a desktop application that combines a customizable Live2D character w
 
 ![Python](https://img.shields.io/badge/Python-3.11.5-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-lightgrey)
+![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
 ## Architecture
 
@@ -180,10 +180,12 @@ Amadeus/
 │   ├── main.py                  # Application entry point
 │   ├── config.py                # YAML configuration loader + typed accessors
 │   ├── app/
-│   │   ├── window.py            # PySide6 main window (261 lines)
-│   │   └── live2d_widget.py     # OpenGL Live2D widget (79 lines)
+│   │   ├── window.py            # PySide6 main window
+│   │   └── live2d_widget.py     # OpenGL Live2D widget
+│   ├── runtime/
+│   │   └── concurrency.py       # AudioRing / Mailbox / BoundedDropOldest primitives
 │   ├── live2d/
-│   │   └── renderer.py          # live2d-py wrapper (115 lines)
+│   │   └── renderer.py          # live2d-py wrapper
 │   ├── audio/
 │   │   ├── capture.py           # PyAudio microphone capture
 │   │   ├── asr.py               # Whisper.cpp speech recognition
@@ -193,7 +195,7 @@ Amadeus/
 │   │   ├── persona.py           # Character persona management
 │   │   └── context.py           # Conversation context window
 │   ├── motion/
-│   │   ├── model.py             # FullDuplexDiT architecture (Hubert+DiT+CNN, 432 lines)
+│   │   ├── model.py             # FullDuplexDiT architecture (Hubert+DiT+CNN)
 │   │   ├── inference.py         # Real-time inference pipeline (4-step DDIM)
 │   │   ├── performance.py       # PerformanceEngine (persona param post-processing)
 │   │   ├── preprocess/
@@ -206,7 +208,7 @@ Amadeus/
 │   │   └── training/
 │   │       ├── dataset.py       # MotionDataset (multimodal dict, 50Hz alignment, fps resample)
 │   │       ├── train.py         # Training script (x-prediction, LoRA, EMA, val split, full checkpoint, early stop)
-│   │       ├── lora.py          # LoRA module (495 lines, full lifecycle API)
+│   │       ├── lora.py          # LoRA module (full lifecycle API)
 │   │       ├── ema.py           # EMA of trainable parameters (no third-party deps)
 │   │       └── visualize.py     # Loss curves, motion comparison, animated GIFs
 │   ├── tts/
@@ -295,8 +297,8 @@ See `requirements-lock.txt` for the complete pinned dependency tree (39 packages
 ## Development
 
 ```bash
-# Install dev dependencies
-pip install pytest black ruff
+# Install dev dependencies (pytest, black, ruff are declared in pyproject)
+pip install -e ".[dev]"
 
 # Run linting
 ruff check src/
@@ -305,8 +307,19 @@ ruff check src/
 basedpyright src/
 
 # Run tests
-pytest tests/
+pytest
 ```
+
+The test suite is hermetic: it needs no network, no microphone, no camera and no
+pretrained weights. `tests/conftest.py` points `HF_HOME` at a scratch directory
+and forces offline mode so the frozen encoders take their built-in stubs, and
+pins MobileNetV3 to random init because torchvision otherwise downloads weights
+even in offline mode. Qt runs headless via `QT_QPA_PLATFORM=offscreen`.
+
+Tests are currently RED-or-GREEN by design: `tests/test_runtime_contracts.py` and
+`tests/test_motion_model_dtypes.py` began as failing tests that documented real
+defects (see `docs/PROJECT_REVIEW_REPORT.md`); they now pass following the fixes
+on `fix/runtime-p0`.
 
 ## Roadmap
 

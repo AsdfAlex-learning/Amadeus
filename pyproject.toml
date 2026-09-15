@@ -20,6 +20,9 @@ dependencies = [
     "pyyaml>=6.0",
     "soundfile>=0.12.0",
     "loguru>=0.7.0",
+    # imported by the code but previously undeclared
+    "librosa>=0.10.0",     # audio resampling fallback
+    "matplotlib>=3.7.0",   # training visualisation
 ]
 
 [project.optional-dependencies]
@@ -28,6 +31,7 @@ dev = [
     "pytest-qt>=4.2.0",
     "black>=23.0.0",
     "ruff>=0.1.0",
+    "basedpyright>=1.0.0",
 ]
 
 [build-system]

@@ -17,7 +17,12 @@ pyttsx3>=2.90
 # ChatTTS
 # fish-speech
 
+# Used at runtime but previously undeclared
+librosa>=0.10.0        # audio resampling fallback (dataset/video_reader)
+matplotlib>=3.7.0      # training visualisation (visualize.py)
+
 # Dev & testing
 pytest>=7.0.0
 black>=23.0.0
 ruff>=0.1.0
+basedpyright>=1.0.0    # used by .github/workflows/ci.yml

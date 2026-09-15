@@ -184,7 +184,9 @@ flowchart TB
 - `ema.py`: Self-contained EMA of trainable parameters. No third-party dependency. Used for validation loss and final checkpoint save when `--ema_decay > 0`.
 - `visualize.py`: Post-training visualisation — loss curves from log files, ground-truth vs predicted motion overlays, and animated GIFs of motion parameters (matplotlib + Pillow only, no TensorBoard).
 
-**Inference** (`inference.py`): Streaming x-prediction diffusion inference with overlap-add. Maintains audio/visual/tts buffers, processes chunks of `chunk_size` seconds via **4-step x-prediction DDIM** (η=0 deterministic), emits parameter dictionaries frame-by-frame to callbacks. **T is dynamically derived from the Hubert encoder output length** (was previously hardcoded to 50). Loads and **hot-swaps character LoRA adapters** via `set_character_id()` — looks up `models/lora/<id>/lora_adapter.pt` and merges in place.
+**Inference** (`inference.py`): Streaming x-prediction diffusion inference. Maintains audio/visual/tts buffers, processes chunks of `chunk_size` seconds via **4-step x-prediction DDIM** (η=0 deterministic), emits parameter dictionaries frame-by-frame to callbacks. **T is dynamically derived from the Hubert encoder output length** (was previously hardcoded to 50). Loads and **hot-swaps character LoRA adapters** via `set_character_id()` — looks up `models/lora/<id>/lora_adapter.pt` and merges in place. Inference can run on a dedicated owner thread (`start_worker()`), in which case `process_*` only publishes and the worker is the sole mutator of the model and its buffers.
+
+> **Not implemented:** cross-chunk overlap-add, despite earlier revisions of this document claiming it. The overlap block in `_try_infer` pops samples from the front of the buffer and re-inserts them in the same order, i.e. it is a no-op, and `_prev_params` is written but never read. Each chunk is therefore independent — there is no temporal continuity mechanism between chunks.
 
 ### 6. TTS (`src/tts/`)
 
@@ -201,7 +203,9 @@ Each backend is loaded lazily, returns `np.ndarray` of float32 audio.
 - `gaze`: angle + direction (left/center/right)
 - `expression`: mouth openness, smile detection, brow raise
 
-These results are mapped to Live2D parameters (gaze → ParamAngleY, smile → ParamMouthForm, etc.) in the window.
+These results are exposed via `on_perception()` for consumers to map to Live2D parameters (gaze → ParamAngleY, smile → ParamMouthForm, etc.).
+
+> **Not wired:** `AmadeusWindow` registers only `on_frame()` (`window.py`), never `on_perception()`. Because `_process_face_mesh` is guarded by `if self._perception_callbacks ...`, the face/gaze/expression analysis is never actually computed in the running application — no consumer maps it to parameters. The frame itself is still fed to the motion model.
 
 ## Data Flow
 
