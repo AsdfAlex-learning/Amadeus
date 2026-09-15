@@ -20,6 +20,12 @@ class DiffusionMotionInference:
         # one as though it were the other compresses speech by ~1.38x, so TTS audio
         # is resampled to the pipeline rate once, at ingest.
         self._tts_sample_rate = int(config.get("tts", {}).get("sample_rate", self.sample_rate))
+
+        # C-8: persona performance parameters were dead config. The engine
+        # (src/motion/performance.py) existed and was exported, but nothing ever
+        # instantiated it, so gesture_scale / expressiveness / react_speed /
+        # mouth_open_max / head_motion_range / idle_energy had no effect at all.
+        self._performance = self._build_performance_engine(config)
         self.model_path = Path(motion_cfg.get("model_path", "models/motion"))
         self.num_inference_steps = int(motion_cfg.get("num_inference_steps", 4))
         self.diffusion_beta_start = float(motion_cfg.get("diffusion_beta_start", 1e-4))
@@ -287,6 +293,9 @@ class DiffusionMotionInference:
 
             params = self._diffusion_infer(user_chunk, tts_chunk, visual_frames)
             if params is not None:
+                # C-8: per-persona multipliers are applied between the model and
+                # the renderer. Speak when TTS is present, otherwise Listen.
+                params = self._apply_performance(params, "speak" if has_tts else "listen")
                 self._prev_params = params
                 self._emit_params(params)
 
@@ -382,11 +391,43 @@ class DiffusionMotionInference:
                 except Exception as e:
                     logger.error(f"Param callback error: {e}")
 
+    @staticmethod
+    def _build_performance_engine(config: dict):
+        """Build the persona post-processor from ``config.performance``. (C-8)"""
+        from src.motion.performance import PerformanceConfig, PerformanceEngine
+
+        perf_cfg = config.get("performance", {}) or {}
+        mapping_path = (
+            (config.get("preprocess", {}) or {}).get("arkit_mapping", {}).get("config_path")
+        )
+        # The config path is project-relative; resolve it so the category mapping
+        # (mouth / eye / head indices) is used rather than the heuristic fallback.
+        if mapping_path and not Path(mapping_path).is_absolute():
+            candidate = Path(__file__).resolve().parents[2] / mapping_path
+            if candidate.exists():
+                mapping_path = candidate
+        return PerformanceEngine(
+            PerformanceConfig.from_dict(perf_cfg), mapping_path=mapping_path
+        )
+
+    def _apply_performance(self, params: np.ndarray, mode: str) -> np.ndarray:
+        """Apply per-persona multipliers to the raw model output. (C-8)"""
+        if self._performance is None:
+            return params
+        try:
+            return self._performance.apply(params, mode=mode)
+        except Exception as e:
+            # Post-processing must never take down motion; fall back to raw params.
+            logger.warning(f"Performance post-processing failed ({e}); using raw params")
+            return params
+
     def reset(self):
         self._audio_buffer.clear()
         self._tts_buffer.clear()
         self._visual_buffer.clear()
         self._prev_params = None
+        if self._performance is not None:
+            self._performance.reset()
 
     def cleanup(self):
         self._model = None
@@ -395,6 +436,8 @@ class DiffusionMotionInference:
         self._audio_buffer.clear()
         self._tts_buffer.clear()
         self._visual_buffer.clear()
+        if self._performance is not None:
+            self._performance.reset()
 
     @property
     def is_loaded(self) -> bool:
