@@ -160,8 +160,14 @@ class TextEncoder(nn.Module):
 
     def forward(self, texts: list[str], device: torch.device) -> torch.Tensor:
         if not self._loaded or self.bert is None or self.tokenizer is None:
-            dummy = torch.zeros(len(texts), self.proj.in_features, device=device)
-            return self.proj(dummy.to(dummy.dtype))
+            # Match the projection's dtype: `dummy.to(dummy.dtype)` was a no-op,
+            # so a half-precision projection was fed float32 and the Linear raised
+            # a dtype mismatch.
+            dummy = torch.zeros(
+                len(texts), self.proj.in_features, device=device,
+                dtype=self.proj.weight.dtype,
+            )
+            return self.proj(dummy)
         with torch.set_grad_enabled(not self._freeze):
             tokens = self.tokenizer(
                 texts, return_tensors="pt", padding=True, truncation=True, max_length=64
@@ -195,7 +201,11 @@ class TimestepEmbedding(nn.Module):
         emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if emb.shape[-1] < self.dim:
             emb = torch.nn.functional.pad(emb, (0, self.dim - emb.shape[-1]))
-        return self.mlp(emb)
+        # The sinusoidal features are computed in float32 for numerical accuracy,
+        # but the projection may have been converted to half precision by
+        # to_half(). Cast to the MLP's own dtype or the Linear raises
+        # "mat1 and mat2 must have the same dtype".
+        return self.mlp(emb.to(next(self.mlp.parameters()).dtype))
 
 
 class AdaLN(nn.Module):
@@ -374,21 +384,17 @@ class FullDuplexDiT(nn.Module):
         logger.info(f"FullDuplexDiT warmed up on {device}")
 
     def to_half(self):
-        self.audio_encoder.to_half()
-        self.visual_encoder.to_half()
-        self.text_encoder.to_half()
-        for module in [
-            self.audio_proj,
-            self.cross_proj,
-            self.mode_embedding,
-            self.time_embed,
-            self.identity_embedding,
-            self.output_head,
-        ]:
-            module.half()
-        for block in self.dit_blocks:
-            block.half()
-        return self
+        """Convert the entire model to half precision.
+
+        Uses ``nn.Module.half()`` over the whole tree instead of a hand-maintained
+        list of submodules. The previous list omitted ``input_proj``, so after
+        conversion it stayed float32 while every DiT block became float16 and the
+        first fp16 forward pass raised "expected scalar type Half but found
+        Float". The encoder submodules are registered attributes, so recursing
+        covers them too - including ``text_encoder.proj``, which the encoder's own
+        ``to_half()`` skipped whenever its backbone had not loaded.
+        """
+        return self.half()
 
     def forward(
         self,
@@ -415,18 +421,29 @@ class FullDuplexDiT(nn.Module):
         # encoder produces 5; the diffusion latent is T. We use simple
         # linear interpolation along the time axis to bring them all to T.
         def _resample_time(x: torch.Tensor, T: int) -> torch.Tensor:
+            """Linearly interpolate ``x`` along the time axis to length ``T``.
+
+            Computed in float32 for numerical stability, then cast back to the
+            input dtype. The previous version built its ramps with float32
+            ``linspace`` and returned them directly, which silently promoted
+            half-precision conditioning to float32 - and since the 5-frame visual
+            features are always interpolated up to T, every fp16 forward pass
+            then failed at ``cross_proj`` with a dtype mismatch.
+            """
             if x.shape[1] == T:
                 return x
             # x: (B, t, D). Interpolate along t to T.
-            B_, t_, D_ = x.shape
-            t_in = torch.linspace(0, 1, t_, device=x.device)
-            t_out = torch.linspace(0, 1, T, device=x.device)
+            out_dtype = x.dtype
+            xf = x.float()
+            B_, t_, D_ = xf.shape
+            t_in = torch.linspace(0, 1, t_, device=x.device, dtype=torch.float32)
+            t_out = torch.linspace(0, 1, T, device=x.device, dtype=torch.float32)
             idx = torch.searchsorted(t_in, t_out)
             idx = idx.clamp(max=t_ - 1)
             idx_prev = (idx - 1).clamp(min=0)
             w = ((t_out - t_in[idx_prev]) /
                  (t_in[idx] - t_in[idx_prev] + 1e-8)).unsqueeze(-1)
-            return (1 - w) * x[:, idx_prev, :] + w * x[:, idx, :]
+            return ((1 - w) * xf[:, idx_prev, :] + w * xf[:, idx, :]).to(out_dtype)
 
         listen_feat = _resample_time(listen_feat, T)
         speak_feat = _resample_time(speak_feat, T)
