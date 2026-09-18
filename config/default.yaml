@@ -85,6 +85,12 @@ motion:
   diffusion_beta_end: 0.02
   identity_vocab_size: 16
   use_fp16: true
+  # Silence state: idle motion when nothing is being listened to or performed.
+  # Without it the engine only steps while someone is talking.
+  silence_enabled: true
+  silence_idle_seconds: 0.5      # quiet time before idle motion starts
+  silence_interval_seconds: 1.0  # how often an idle step runs
+  max_speech_lag_seconds: 1.5    # how far Speak state may fall behind playback
 
 perception:
   camera_device: null

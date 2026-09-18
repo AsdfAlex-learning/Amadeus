@@ -1,4 +1,5 @@
 import threading
+import time
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
@@ -94,6 +95,18 @@ class DiffusionMotionInference:
         self._max_lag_s = float(
             motion_cfg.get("max_speech_lag_seconds", self.DEFAULT_MAX_SPEECH_LAG_SECONDS)
         )
+
+        # Silence state. Without it the engine is a two-state implementation:
+        # `_try_infer` requires a full chunk in some buffer, so with nothing to
+        # listen to and nothing to perform there were no inference steps at all -
+        # the "always-on" engine was on only while someone was talking, and idle
+        # behaviour came solely from the renderer's underflow decay.
+        self._silence_enabled = bool(motion_cfg.get("silence_enabled", True))
+        self._silence_idle_s = float(motion_cfg.get("silence_idle_seconds", 0.5))
+        self._silence_interval_s = float(motion_cfg.get("silence_interval_seconds", 1.0))
+        self._silence_prompt = ""
+        self._last_activity_at = time.monotonic()
+        self._last_silence_at = 0.0
         # Thread-safe: written by the camera thread, read by the motion worker.
         # A plain list was shared between them, so the writer's prune raced the
         # reader's indexed snapshot. (S2.2)
@@ -238,6 +251,16 @@ class DiffusionMotionInference:
     def set_text_prompt(self, prompt: str):
         self._current_prompt = prompt
 
+    def set_silence_prompt(self, prompt: str):
+        """Text prompt used for Silence-state motion.
+
+        Kept separate from the dialogue prompt: idle behaviour is described by
+        perception and elapsed time ("user has been quiet for 15 s"), not by what
+        was last said. `docs/MODEL_TRAINING_ROADMAP.md` proposes a
+        SilencePromptGenerator to populate this.
+        """
+        self._silence_prompt = prompt
+
     def set_character_id(self, char_id: int):
         """Set the active character and hot-swap LoRA adapters when possible.
 
@@ -255,6 +278,7 @@ class DiffusionMotionInference:
     def process_user_audio(self, audio: np.ndarray):
         if not self._loaded or self._model is None:
             return
+        self._last_activity_at = time.monotonic()
         if self._motion_worker is not None:
             # The worker owns the audio buffer and inference; this thread only
             # publishes. Runs on the capture drain worker, so it must stay fast.
@@ -273,6 +297,7 @@ class DiffusionMotionInference:
         """
         if not self._loaded or self._model is None:
             return
+        self._last_activity_at = time.monotonic()
         source_rate = int(sample_rate) if sample_rate is not None else self._tts_sample_rate
         resampled = self._resample_audio(
             np.asarray(audio, dtype=np.float32), source_rate, self.sample_rate
@@ -324,11 +349,50 @@ class DiffusionMotionInference:
             self._motion_worker = worker
         self._motion_wake.clear()
 
+    def _maybe_run_silence(self) -> None:
+        """Emit idle motion when nothing else is driving the engine.
+
+        CONTEXT.md's third state had no driver at all: `_try_infer` needs a full
+        chunk in some buffer, so with no speech to listen to and nothing to perform
+        there were zero inference steps and idle behaviour came only from the
+        renderer decaying to its neutral pose. This is what makes the engine
+        actually always-on.
+
+        Only the owner thread runs this, so it needs no locking.
+        """
+        if not self._silence_enabled or self._speech is not None:
+            return
+        chunk_samples = int(self.chunk_size * self.sample_rate)
+        if len(self._audio_buffer) >= chunk_samples:
+            return  # the Listen state already has work queued
+
+        now = time.monotonic()
+        if now - self._last_activity_at < self._silence_idle_s:
+            return  # still within the tail of a real interaction
+        if now - self._last_silence_at < self._silence_interval_s:
+            return
+        self._last_silence_at = now
+
+        zeros = np.zeros(chunk_samples, dtype=np.float32)
+        visual_frames = self._prepare_visual_frames(chunk_samples)
+        params = self._diffusion_infer(
+            zeros, zeros, visual_frames, prompt=self._silence_prompt or self._current_prompt
+        )
+        if params is not None:
+            # "silence" mode, so PerformanceEngine uses idle_energy rather than
+            # speech expressiveness.
+            params = self._apply_performance(params, "silence")
+            self._prev_params = params
+            self._emit_params(params)
+
     def _motion_loop(self):
-        """Sole consumer of the audio queue and sole caller of ``_try_infer``."""
+        """Sole consumer of the audio queue and sole caller of ``_try_infer``.
+
+        Ticks on a timer rather than only on a wake, so the Silence state runs
+        while nothing is published.
+        """
         while not self._worker_stop.is_set():
-            if not self._motion_wake.wait(timeout=self._WORKER_POLL_S):
-                continue
+            self._motion_wake.wait(timeout=self._WORKER_POLL_S)
             self._motion_wake.clear()
             if self._worker_stop.is_set():
                 break
@@ -342,6 +406,7 @@ class DiffusionMotionInference:
 
             try:
                 self._try_infer()
+                self._maybe_run_silence()
             except Exception as e:
                 self._consecutive_failures += 1
                 logger.error(
@@ -549,7 +614,11 @@ class DiffusionMotionInference:
         return np.ascontiguousarray(frames_hwc.transpose(0, 3, 1, 2))
 
     def _diffusion_infer(
-        self, user_audio: np.ndarray, tts_audio: np.ndarray, visual_frames: np.ndarray
+        self,
+        user_audio: np.ndarray,
+        tts_audio: np.ndarray,
+        visual_frames: np.ndarray,
+        prompt: str | None = None,
     ) -> np.ndarray | None:
         if self._model is None:
             return None
@@ -564,7 +633,8 @@ class DiffusionMotionInference:
             tts_wav = torch.from_numpy(tts_audio).unsqueeze(0).to(self._device)
             vis = torch.from_numpy(visual_frames).unsqueeze(0).float().to(self._device)
             id_tensor = torch.tensor([self._character_id], device=self._device)
-            prompts = [self._current_prompt] if self._current_prompt else [""]
+            active_prompt = prompt if prompt is not None else self._current_prompt
+            prompts = [active_prompt] if active_prompt else [""]
 
             B = 1
             # Derive T from the audio encoder output length instead of hardcoding
