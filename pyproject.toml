@@ -71,3 +71,41 @@ testpaths = ["tests"]
 # The runtime contract tests are deliberately RED until the P0 fixes land;
 # see docs/PROJECT_REVIEW_REPORT.md.
 addopts = "-ra"
+
+# .github/workflows/ci.yml runs `basedpyright src/`, but the project had no
+# configuration for it at all. Unconfigured, basedpyright's default
+# ("recommended") mode reports 203 errors and 2384 warnings against this
+# largely-untyped codebase - almost all of them the reportUnknown* family, which
+# describe missing annotations rather than defects. The step was therefore either
+# failing permanently or being ignored.
+#
+# With this configuration the baseline is ~38 errors / ~55 warnings, dominated by
+# reportOptionalMemberAccess on untyped attributes (guards the checker cannot
+# narrow) and by third-party stub inaccuracies. That is a known backlog, so CI
+# runs the step with continue-on-error until it reaches zero.
+[tool.basedpyright]
+include = ["src"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+# Annotation-coverage checks: disabled because they flag untyped code as such.
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownParameterType = false
+reportUnknownArgumentType = false
+reportUnknownLambdaType = false
+reportUnknownType = false
+reportMissingTypeArgument = false
+reportMissingTypeStubs = false
+reportAny = false
+reportExplicitAny = false
+reportImplicitAny = false
+reportUnusedCallResult = false
+reportUnreachable = false
+# Optional backends (cosyvoice2, ChatTTS, fish-speech, pyttsx3, librosa) are
+# imported lazily behind try/except and are not all installed. Those are
+# warnings, not errors: their absence is a supported configuration.
+reportMissingImports = "warning"
+reportMissingModuleSource = "warning"
+# torch's bundled stubs omit several re-exports that work at runtime
+# (GradScaler, autocast). That is a stub inaccuracy, not a code defect.
+reportPrivateImportUsage = "warning"
