@@ -249,3 +249,34 @@ def test_persona_performance_params_change_emitted_motion(
         "performance.gesture_scale has no effect on the emitted Live2D parameters: "
         "PerformanceEngine is not wired into the inference path."
     )
+
+
+def test_listen_step_consumes_exactly_one_chunk(config: dict) -> None:
+    """Each Listen step must consume exactly one chunk, leaving no residue.
+
+    The removed "overlap" code popped `keep_n` samples from the front of the
+    buffer and re-inserted them in the same order: a no-op that neither carried
+    audio across chunks nor left the buffer short, while implying continuity that
+    did not exist. This guards against a half-implemented overlap being
+    reintroduced, which would silently change how much audio a step consumes.
+    """
+    seen: list[int] = []
+
+    def _infer(user_chunk, _tts_chunk, _visual):
+        seen.append(int(user_chunk.size))
+        return None
+
+    engine = _stubbed_engine(config, _infer)
+    for _ in range(3):
+        engine._audio_buffer.extend([0.1] * CHUNK_SAMPLES)
+
+    engine.process_user_audio(np.zeros(CHUNK_SAMPLES, dtype=np.float32))
+
+    assert seen, "no inference step ran"
+    assert all(size == CHUNK_SAMPLES for size in seen), (
+        f"a step consumed an unexpected amount of audio: {seen}"
+    )
+    assert len(seen) == 4, f"expected 4 consuming steps, got {len(seen)}"
+    assert len(engine._audio_buffer) == 0, (
+        f"{len(engine._audio_buffer)} samples were left over after draining four chunks"
+    )

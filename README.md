@@ -336,8 +336,33 @@ on `fix/runtime-p0`.
     checkpoints, legacy path fix
   - See `docs/TRAINING_PIPELINE_REVIEW.md` and `docs/adr/0002-*.md`
 - [ ] Phase 8: First end-to-end training run on real character data
+  - HDTF (real human video, not a character) has been run end-to-end as a
+    pipeline smoke test — see "Verified Dataset: HDTF" above
+  - Character-specific data is still outstanding
 - [ ] Phase 9: Memory system integration (LLMChatFlow)
 - [ ] Phase 10: Multi-character support & live swapping
+
+## Runtime hardening (`fix/runtime-p0`)
+
+The runtime had never been executed end-to-end — the application could not even
+start, because `src/app/live2d_widget.py` used the Qt5 import path for
+`QOpenGLWidget` (PySide6 6.11 moved it to `QtOpenGLWidgets`). A hermetic test
+suite now covers the runtime, and 8 of the 9 critical defects catalogued in
+`docs/PROJECT_REVIEW_REPORT.md` are fixed and verified.
+
+```bash
+pytest      # 150 tests, ~20 s, no network / microphone / camera / model weights
+```
+
+Design records: `docs/adr/0003-runtime-threading-and-realtime-architecture.md`
+(thread ownership — the PortAudio callback only enqueues) and
+`docs/adr/0004-speak-state-and-render-synchronisation.md` (Speak state follows the
+playback clock; Silence state finally has a driver). Both were independently
+reviewed and revised before implementation.
+
+**Not yet verified on real hardware.** The suite is hermetic by construction, so
+passing tests do not mean the application runs: `assets/live2d/` has no model,
+`models/whisper/` does not exist, and no TTS backend is installed.
 
 ## License
 

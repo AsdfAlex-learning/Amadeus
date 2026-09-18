@@ -116,8 +116,7 @@ class DiffusionMotionInference:
             capacity=int(motion_cfg.get("visual_buffer_frames", 10)),
             max_age_s=max(2.5, 5.0 / max(self._frame_fps, 1e-6)),
         )
-        self._overlap = 0.2
-        self._prev_params: np.ndarray | None = None
+        self._overlap = 0.0  # retained for API compatibility; see the NOTE in _try_infer
         self._current_prompt = ""
         self._character_id = 0
 
@@ -382,7 +381,6 @@ class DiffusionMotionInference:
             # "silence" mode, so PerformanceEngine uses idle_energy rather than
             # speech expressiveness.
             params = self._apply_performance(params, "silence")
-            self._prev_params = params
             self._emit_params(params)
 
     def _motion_loop(self):
@@ -573,13 +571,13 @@ class DiffusionMotionInference:
                 )
                 tts_chunk = np.zeros(chunk_samples, dtype=np.float32)
 
-                if self._overlap > 0:
-                    keep_n = int(self._overlap * self.sample_rate)
-                    keep = [
-                        self._audio_buffer.popleft()
-                        for _ in range(min(keep_n, len(self._audio_buffer)))
-                    ]
-                    self._audio_buffer.extendleft(reversed(keep))
+                # NOTE: there is deliberately no overlap/continuity logic here. The
+                # code that used to live at this point popped `keep_n` samples from
+                # the front of the buffer and re-inserted them in the same order -
+                # a no-op that neither carried audio across chunks nor left the
+                # buffer short, while implying continuity that did not exist. Each
+                # chunk is inferred independently. Adding real conditioning would
+                # also require revisiting the Speak-state drop policy (ADR 0003).
 
             params = self._diffusion_infer(user_chunk, tts_chunk, visual_frames)
             if params is not None:
@@ -588,7 +586,6 @@ class DiffusionMotionInference:
                 params = self._apply_performance(
                     params, "speak" if speaking else "listen"
                 )
-                self._prev_params = params
                 self._emit_params(params)
 
     def _prepare_visual_frames(self, audio_samples: int) -> np.ndarray:
@@ -728,7 +725,6 @@ class DiffusionMotionInference:
         self._speech_inferred = 0
         self._tts_pending.clear()
         self._visual_buffer.clear()
-        self._prev_params = None
         if self._performance is not None:
             self._performance.reset()
 

@@ -1,10 +1,10 @@
 name: CI
 
+# Runs on every branch. It previously triggered only on main, while all
+# development happens on fix/* branches - so the working code was never checked.
 on:
   push:
-    branches: [main]
   pull_request:
-    branches: [main]
 
 jobs:
   lint:
@@ -81,3 +81,26 @@ jobs:
           mic.cleanup()
           print('Import verification: PASS')
           "
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y portaudio19-dev
+
+      - name: Install Python deps
+        run: pip install -r requirements-lock.txt pytest
+
+      # No network, no microphone, no camera, no model weights: tests/conftest.py
+      # forces the offline encoder stubs, blocks the torchvision weight download
+      # and runs Qt headless.
+      - name: Run tests
+        run: pytest -q
