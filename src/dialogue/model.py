@@ -9,11 +9,13 @@ is never stored in config or the repository).
 
 import json
 import os
+import select
 import threading
 from collections.abc import Generator
 from http import client as http_client
 from queue import Empty, Queue
 from time import monotonic
+from typing import Any
 from urllib.parse import urlparse
 
 from loguru import logger
@@ -28,9 +30,11 @@ class DialogueUnavailableError(RuntimeError):
 # (deadline anchoring; a per-arrival timer would starve on a steady drip).
 _FLUSH_INTERVAL_S = 0.2
 _POLL_S = 0.05
-# The stream reader polls the socket at this granularity: on Windows, closing a
-# socket does not reliably wake a blocked recv (measured 0-5 s, or only at
-# socket timeout), so the reader must wake itself to notice stop/close.
+# The stream reader waits for readability via select() at this granularity (not
+# by timing out reads): on Windows, closing a socket does not reliably wake a
+# blocked recv, and a timed-out read permanently poisons the makefile-based
+# response object ("cannot read from timed out object" - SocketIO sets
+# _timeout_occurred and refuses further reads).
 _STREAM_POLL_S = 0.25
 _BOUNDARY_CHARS = frozenset(" \t\n\r.,!?;:，。！？；：、…—\"'”’)）]】")
 
@@ -38,15 +42,15 @@ _TEXT, _DONE, _ERROR = 0, 1, 2
 _UNPARSED = object()
 
 
-def _open_stream(url: str, headers: dict, body: str, timeout: float):
+def _open_stream(url: str, headers: dict, body: bytes, timeout: float):
     """POST and return ``(response, connection)``.
 
     Teardown notes (Oracle review F-1, re-measured locally): on Windows,
     ``response.close()`` deadlocks against a concurrent reader and
     ``closesocket`` does not reliably wake a blocked recv (0-5 s, sometimes only
-    at socket timeout). The reader therefore polls at a short timeout
-    (``_STREAM_POLL_S``) and the caller tears down via ``conn.sock.close()``
-    as a best effort without waiting for the reader to wake.
+    at socket timeout). The reader therefore waits for readability via
+    ``select`` (``_STREAM_POLL_S``) and the caller tears down via
+    ``conn.sock.close()`` as a best effort without waiting for the reader.
     """
     parsed = urlparse(url)
     conn_cls = (
@@ -55,9 +59,6 @@ def _open_stream(url: str, headers: dict, body: str, timeout: float):
     conn = conn_cls(parsed.netloc, timeout=timeout)
     conn.request("POST", parsed.path or "/", body=body, headers=headers)
     resp = conn.getresponse()
-    # Streaming phase: short read timeout so the reader wakes itself to notice
-    # stop/close instead of relying on closesocket to break the recv.
-    conn.sock.settimeout(_STREAM_POLL_S)
     return resp, conn
 
 
@@ -129,7 +130,7 @@ class DialogueModel:
         stop = threading.Event()
         reader = threading.Thread(
             target=self._read_stream,
-            args=(resp, queue, stop),
+            args=(resp, conn, queue, stop),
             name="amadeus-dialogue-stream",
             daemon=True,
         )
@@ -206,23 +207,26 @@ class DialogueModel:
         key = os.environ.get(self.api_key_env, "") if self.api_key_env else ""
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        return url, headers, json.dumps(body, ensure_ascii=False)
+        # Bytes, not str: http.client encodes str bodies as latin-1 and rejects
+        # any non-ASCII payload (the persona prompt is Chinese - caught by the
+        # real-service smoke, not by the ASCII-only hermetic tests).
+        return url, headers, json.dumps(body, ensure_ascii=False).encode("utf-8")
 
     # ------------------------------------------------------------------- reader
 
-    def _read_stream(self, resp, queue: Queue, stop: threading.Event) -> None:
+    def _read_stream(self, resp, conn, queue: Queue, stop: threading.Event) -> None:
         try:
             if self.provider == "openai":
-                self._read_sse(resp, queue, stop)
+                self._read_sse(resp, conn, queue, stop)
             else:
-                self._read_ndjson(resp, queue, stop)
+                self._read_ndjson(resp, conn, queue, stop)
             queue.put((_DONE, None))
         except Exception as e:
             queue.put((_ERROR, f"对话服务读取失败：{e}"))
 
-    def _read_sse(self, resp, queue: Queue, stop: threading.Event) -> None:
+    def _read_sse(self, resp, conn, queue: Queue, stop: threading.Event) -> None:
         pending: list[str] = []
-        for raw in _iter_lines(resp, stop):
+        for raw in _iter_lines(resp, conn, stop):
             line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
             if not line:
                 pending.clear()
@@ -267,8 +271,8 @@ class DialogueModel:
         content = delta.get("content")
         return content if isinstance(content, str) else ""
 
-    def _read_ndjson(self, resp, queue: Queue, stop: threading.Event) -> None:
-        for raw in _iter_lines(resp, stop):
+    def _read_ndjson(self, resp, conn, queue: Queue, stop: threading.Event) -> None:
+        for raw in _iter_lines(resp, conn, stop):
             line = raw.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
@@ -289,17 +293,28 @@ class DialogueModel:
                 return
 
 
-def _iter_lines(resp, stop: threading.Event):
+def _iter_lines(resp, conn, stop: threading.Event):
     """Yield response lines, waking periodically to honour ``stop``.
 
-    ``readline`` may raise ``TimeoutError`` between lines; that is just the
-    poll tick, not a failure. EOF yields nothing further.
+    Waits for readability with ``select`` at ``_STREAM_POLL_S`` instead of
+    timing out reads: one timed-out read permanently poisons the makefile-based
+    response object (``SocketIO._timeout_occurred`` -> "cannot read from timed
+    out object"), and closing the socket does not reliably wake a blocked recv
+    on Windows. ``readline`` therefore runs only while data is pending; a
+    genuine mid-line stall surfaces as a read timeout error. Fakes without a
+    real socket fall back to plain blocking ``readline``.
     """
+    sock: Any = getattr(conn, "sock", None)
+    use_select = sock is not None and hasattr(sock, "fileno")
     while not stop.is_set():
-        try:
-            raw = resp.readline()
-        except TimeoutError:
-            continue
+        if use_select and sock is not None:
+            try:
+                ready = select.select([sock], [], [], _STREAM_POLL_S)[0]
+            except (OSError, ValueError):
+                return  # socket closed under us
+            if not ready:
+                continue
+        raw = resp.readline()
         if not raw:
             return
         yield raw

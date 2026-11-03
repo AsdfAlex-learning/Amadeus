@@ -390,7 +390,7 @@ def test_cancel_before_first_chunk():
     try:
         cancel = threading.Event()
         dm = DialogueModel(make_config(api_base=f"http://127.0.0.1:{port}", api_key_env=""))
-        gen = dm.generate([{"role": "user", "content": "hi"}], cancel_event=cancel)
+        gen = dm.generate([{"role": "user", "content": "你好"}], cancel_event=cancel)
         it = iter(gen)
         cancel.set()
         t0 = time.monotonic()
@@ -432,7 +432,7 @@ def test_loopback_socket_close_unblocks_reader():
     try:
         cancel = threading.Event()
         dm = DialogueModel(make_config(api_base=f"http://127.0.0.1:{port}", api_key_env=""))
-        gen = dm.generate([{"role": "user", "content": "hi"}], cancel_event=cancel)
+        gen = dm.generate([{"role": "user", "content": "你好"}], cancel_event=cancel)
         it = iter(gen)
         assert next(it) == "Hi."
         cancel.set()
@@ -518,6 +518,16 @@ def test_no_auth_header_when_env_empty(monkeypatch):
     h = StreamHarness([DONE]).install(monkeypatch)
     collect(h.model().generate([]))
     assert "Authorization" not in h.headers
+
+
+def test_request_body_is_utf8_bytes_roundtripping_chinese():
+    """http.client rejects str bodies with non-ASCII (latin-1 encode); the body
+    must be pre-encoded UTF-8 bytes. The persona prompt is Chinese."""
+    dm = DialogueModel(make_config())
+    messages = [{"role": "system", "content": "你是 Amadeus。"}]
+    _url, _headers, body = dm._build_request(messages)
+    assert isinstance(body, bytes)
+    assert json.loads(body.decode("utf-8"))["messages"] == messages
 
 
 def test_url_join_normalizes_trailing_slash(monkeypatch):
