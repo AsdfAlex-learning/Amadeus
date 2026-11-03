@@ -47,12 +47,25 @@ asr:
   model_dir: "models/whisper"
 
 dialogue:
-  # Model type: qwen2.5, llama, custom
-  model_type: "qwen2.5"
-  model_path: "models/dialogue"
-  model_size: "3B"
-  quantization: "int8"  # int4, int8, fp16
+  # Dialogue runs over HTTP (ADR 0005). Leave provider/api_base/model empty to
+  # disable the dialogue model entirely.
+  # provider: "openai" (OpenAI-compatible /chat/completions) or "ollama" (/api/chat)
+  provider: ""
+  # Examples: https://api.deepseek.com/v1   |   http://localhost:11434
+  api_base: ""
+  # Examples: deepseek-chat   |   qwen2.5:3b
+  model: ""
+  # Name of the environment variable holding the API key. Never put the key here.
+  api_key_env: "AMADEUS_API_KEY"
+  request_timeout_seconds: 60
   max_context_tokens: 4096
+  max_new_tokens: 512
+  temperature: 0.7
+  top_p: 0.9
+  # Sent as "repeat_penalty" on the ollama protocol only (not an OpenAI field).
+  repetition_penalty: 1.1
+  persona_name: "Amadeus"
+  persona_file: ""
   # System prompt / character persona
   persona: |
     你是 Amadeus，一个温柔、理性、有共情能力的 AI 助手。
