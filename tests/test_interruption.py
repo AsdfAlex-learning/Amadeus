@@ -11,7 +11,6 @@ still seconds away.
 
 from __future__ import annotations
 
-import threading
 import time
 
 import numpy as np
@@ -19,7 +18,7 @@ import pytest
 from PySide6.QtGui import QCloseEvent
 
 from src.app.window import AmadeusWindow
-from src.audio.pipeline import AudioPipeline, PipelineState
+from src.audio.pipeline import AudioPipeline
 
 
 @pytest.fixture
@@ -34,7 +33,7 @@ def window(config: dict, qapp, monkeypatch):
 
 
 def _slow_generator(chunks: int = 200, delay: float = 0.02):
-    def _generate(_messages):
+    def _generate(_messages, **_kw):
         for _ in range(chunks):
             yield "x"
             time.sleep(delay)

@@ -21,6 +21,7 @@ import pytest
 from PySide6.QtGui import QCloseEvent
 
 from src.app.window import AmadeusWindow
+from src.dialogue.model import DialogueUnavailableError
 
 
 @pytest.fixture
@@ -36,7 +37,7 @@ def window(config: dict, qapp, monkeypatch):
 
 
 def _slow_generator(chunks: int = 50, delay: float = 0.02):
-    def _generate(_messages):
+    def _generate(_messages, **_kw):
         for _ in range(chunks):
             yield "x"
             time.sleep(delay)
@@ -81,7 +82,6 @@ def test_a_replacement_generation_is_not_cancelled_by_the_previous_cancel(
     )
 
     # It must actually produce output rather than breaking on its first chunk.
-    produced = window.context.get_user_messages()
     assert _wait_until(lambda: window._generation_thread is not None), "no thread"
 
 
@@ -111,7 +111,7 @@ def test_a_superseded_completion_does_not_clear_the_current_flag(window, monkeyp
 
 def test_the_current_generation_completion_does_clear_the_flag(window, monkeypatch) -> None:
     """The gating must not break the normal path."""
-    monkeypatch.setattr(window.dialogue_model, "generate", lambda _m: iter(["hi"]))
+    monkeypatch.setattr(window.dialogue_model, "generate", lambda _m, **_kw: iter(["hi"]))
     monkeypatch.setattr(type(window.tts_engine), "is_loaded", property(lambda self: False))
 
     window._start_generation()
@@ -155,3 +155,69 @@ def test_a_truncated_turn_is_kept_in_context(window, monkeypatch) -> None:
         m for m in window.context.get_messages() if m["role"] == "assistant"
     ]
     assert assistant_turns, "the truncated assistant turn was discarded from context"
+
+
+def test_backend_error_is_displayed_out_of_band(window, monkeypatch, qapp) -> None:
+    """ADR 0005 D8: backend diagnostics are shown but never enter the history
+    as if the character had said them (and are never spoken)."""
+
+    def boom(_messages, **_kw):
+        raise DialogueUnavailableError("测试原因")
+        yield  # pragma: no cover - makes this a generator
+
+    monkeypatch.setattr(window.dialogue_model, "generate", boom)
+    monkeypatch.setattr(type(window.tts_engine), "is_loaded", property(lambda self: False))
+
+    window._start_generation()
+    assert _wait_until(
+        lambda: window._generation_thread is not None and not window._generation_thread.is_alive()
+    )
+    window._on_response_done(window._generation_id)
+    qapp.processEvents()
+
+    assert "测试原因" in window.conversation_display.toPlainText()
+    assert window.context.get_messages() == [], (
+        "a backend diagnostic was written into the conversation history"
+    )
+
+
+def test_empty_turn_is_not_added_to_history(window, monkeypatch) -> None:
+    """A cancelled-before-first-chunk turn is not a turn (ADR 0005, F-9)."""
+    monkeypatch.setattr(window.dialogue_model, "generate", lambda _m, **_kw: iter([]))
+    monkeypatch.setattr(type(window.tts_engine), "is_loaded", property(lambda self: False))
+
+    window._start_generation()
+    assert _wait_until(
+        lambda: window._generation_thread is not None and not window._generation_thread.is_alive()
+    )
+    assert window.context.get_messages() == [], (
+        "an empty turn reached the history as an empty assistant message"
+    )
+
+
+def test_cancel_generation_sets_the_stream_cancel_event(window, monkeypatch) -> None:
+    """The per-generation event must be created, handed to generate(), set on
+    cancel, and cleaned up afterwards."""
+    release = threading.Event()
+    seen: dict = {}
+
+    def fake(_messages, cancel_event=None, **_kw):
+        seen["event"] = cancel_event
+        yield "x"
+        release.wait(timeout=5)
+
+    monkeypatch.setattr(window.dialogue_model, "generate", fake)
+    monkeypatch.setattr(type(window.tts_engine), "is_loaded", property(lambda self: False))
+
+    window._start_generation()
+    generation_id = window._generation_id
+    assert _wait_until(lambda: seen.get("event") is not None), "cancel_event not passed"
+
+    window._cancel_generation(generation_id)
+    assert seen["event"].is_set(), "_cancel_generation did not set the stream cancel event"
+
+    release.set()
+    assert _wait_until(
+        lambda: window._generation_thread is not None and not window._generation_thread.is_alive()
+    )
+    assert generation_id not in window._generation_cancel_events, "cancel event not cleaned up"

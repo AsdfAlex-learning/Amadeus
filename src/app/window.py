@@ -1,4 +1,5 @@
 import threading
+
 from loguru import logger
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QFont
@@ -13,7 +14,7 @@ from PySide6.QtWidgets import (
 
 from src.audio.pipeline import AudioPipeline, PipelineState
 from src.dialogue.context import ConversationContext
-from src.dialogue.model import DialogueModel
+from src.dialogue.model import DialogueModel, DialogueUnavailableError
 from src.dialogue.persona import Persona
 from src.motion.inference import DiffusionMotionInference
 from src.perception.camera import CameraPerception
@@ -54,6 +55,11 @@ class AmadeusWindow(QMainWindow):
         # interrupting utterance would get no reply at all.
         self._generation_id = 0
         self._cancelled_generations: set[int] = set()
+        # Per-generation cancel signal handed to generate(): the model client
+        # checks it from inside its stream loop, so interruption also works
+        # while waiting for the first token or during a mid-stream silence
+        # (checking only between chunks never fires in those windows).
+        self._generation_cancel_events: dict[int, threading.Event] = {}
         self._shutting_down = False
         self._generation_thread: threading.Thread | None = None
         # T7: owns the output stream and publishes playback position. It creates
@@ -141,8 +147,8 @@ class AmadeusWindow(QMainWindow):
         success = self.dialogue_model.load()
         if not success:
             self.conversation_display.append(
-                "<span style='color:#888'>💡 对话模型未加载。请安装 Ollama 并运行: "
-                "ollama pull qwen2.5:3b</span>"
+                "<span style='color:#888'>💡 对话模型未配置。请在 config/default.yaml 的 "
+                "dialogue 段设置 provider、api_base、model，并将 API 密钥置于环境变量</span>"
             )
 
     def _load_motion_model(self):
@@ -191,9 +197,11 @@ class AmadeusWindow(QMainWindow):
         # is a native crash rather than a Python exception.
         self._generation_id += 1
         generation_id = self._generation_id
+        cancel_event = threading.Event()
+        self._generation_cancel_events[generation_id] = cancel_event
         self._generation_thread = threading.Thread(
             target=self._run_generation,
-            args=(generation_id,),
+            args=(generation_id, cancel_event),
             daemon=True,
             name="amadeus-generation",
         )
@@ -207,28 +215,38 @@ class AmadeusWindow(QMainWindow):
         target = self._generation_id if generation_id is None else generation_id
         if target > 0:
             self._cancelled_generations.add(target)
+            event = self._generation_cancel_events.get(target)
+            if event is not None:
+                event.set()
         if len(self._cancelled_generations) > 64:
             # Only the newest id can still be in flight.
             self._cancelled_generations = {max(self._cancelled_generations)}
 
-    def _run_generation(self, generation_id: int):
+    def _run_generation(self, generation_id: int, cancel_event: threading.Event):
         messages = [{"role": "system", "content": self.persona.format_prompt([])}]
         messages.extend(self.context.get_messages())
         full_response = ""
         try:
-            for chunk in self.dialogue_model.generate(messages):
+            for chunk in self.dialogue_model.generate(messages, cancel_event=cancel_event):
                 if self._is_generation_cancelled(generation_id):
                     break  # superseded, interrupted, or shutting down
                 full_response += chunk
                 self._bridge.response_chunk.emit(chunk)
+        except DialogueUnavailableError as e:
+            # Out-of-band (ADR 0005 D8): show the reason, but never feed it to
+            # the history or TTS as if the character had said it.
+            self._bridge.response_chunk.emit(f"（{e}）")
         except Exception as e:
             logger.error(f"Generation error: {e}")
             self._bridge.response_chunk.emit("（抱歉，出了点问题...）")
         finally:
             # A truncated turn is KEPT: the user already heard part of it, and
             # deleting it would make the next reply reference a statement the
-            # model believes it never made.
-            self.context.add_assistant_message(full_response)
+            # model believes it never made. An empty turn is not a turn and must
+            # not reach the history as an empty assistant message.
+            if full_response.strip():
+                self.context.add_assistant_message(full_response)
+            self._generation_cancel_events.pop(generation_id, None)
             self._bridge.response_done.emit(generation_id)
             if (
                 self.tts_engine.is_loaded

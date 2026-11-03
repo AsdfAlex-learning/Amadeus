@@ -44,7 +44,7 @@ def _install_slow_generation(window, monkeypatch) -> threading.Thread:
         type(window.tts_engine), "is_loaded", property(lambda self: False)
     )
 
-    def slow_generate(_messages):
+    def slow_generate(_messages, **_kw):
         for _ in range(200):
             yield "x"
             time.sleep(0.05)
@@ -60,7 +60,7 @@ def _install_slow_generation(window, monkeypatch) -> threading.Thread:
 
 def test_generation_thread_handle_is_retained(window, monkeypatch) -> None:
     """Without the handle, joining is impossible in principle."""
-    monkeypatch.setattr(window.dialogue_model, "generate", lambda _m: iter(["hi"]))
+    monkeypatch.setattr(window.dialogue_model, "generate", lambda _m, **_kw: iter(["hi"]))
     window._start_generation()
 
     assert window._generation_thread is not None
