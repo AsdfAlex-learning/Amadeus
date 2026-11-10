@@ -96,7 +96,7 @@ class AmadeusWindow(QMainWindow):
         if window_cfg["fullscreen"]:
             self.showFullScreen()
         if window_cfg.get("transparent_background", False):
-            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             self.setStyleSheet("background: transparent;")
 
     def _setup_ui(self):
@@ -121,7 +121,7 @@ class AmadeusWindow(QMainWindow):
         layout.addWidget(self.conversation_display)
 
         self.status_label = QLabel("● 就绪")
-        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setStyleSheet(
             "QLabel { color: #888; background: rgba(0,0,0,120); "
             "padding: 4px 16px; border-radius: 10px; font-size: 13px; }"

@@ -203,8 +203,11 @@ def test_audio_ring_write_does_not_block_when_full():
 
 def test_audio_ring_is_safe_under_concurrent_producer_and_consumer():
     """Smoke test for the SPSC claim: no exception, no corruption of ordering."""
-    ring = AudioRing(capacity=1024)
     written = 20_000
+    # Capacity covers the whole stream: this test checks concurrent ordering,
+    # not the documented overwrite/lapping path (covered by the deterministic
+    # overflow tests above).
+    ring = AudioRing(capacity=written + 256)
     consumed: list[np.ndarray] = []
     stop = threading.Event()
 

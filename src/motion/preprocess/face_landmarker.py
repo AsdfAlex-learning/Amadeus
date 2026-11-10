@@ -120,7 +120,8 @@ class FaceLandmarkerExtractor:
     def _init_legacy(self):
         import mediapipe as mp
 
-        self._legacy_face_mesh = mp.solutions.face_mesh.FaceMesh(
+        face_mesh = getattr(mp.solutions, "face_mesh")
+        self._legacy_face_mesh = face_mesh.FaceMesh(
             static_image_mode=False,
             max_num_faces=1,
             refine_landmarks=True,

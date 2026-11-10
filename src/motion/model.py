@@ -16,7 +16,7 @@ class HubertEncoder(nn.Module):
         self.model_name = model_name
         self._freeze = freeze
         self._loaded = False
-        self.hubert = None
+        self.hubert: Any = None
         self._try_load()
 
     def _try_load(self):
@@ -128,8 +128,8 @@ class TextEncoder(nn.Module):
         self.model_name = model_name
         self._freeze = freeze
         self._loaded = False
-        self.bert = None
-        self.tokenizer = None
+        self.bert: Any = None
+        self.tokenizer: Any = None
         self._try_load()
         self.bert_dim = 128 if self._loaded else 256
         self.proj = nn.Linear(self.bert_dim, output_dim)

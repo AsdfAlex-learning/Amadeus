@@ -126,7 +126,7 @@ class Live2DWidget(QOpenGLWidget):
         # The drain runs on its own timer, NOT in paintGL: paintGL stops when the
         # widget is hidden or occluded, a QTimer does not.
         self._drain_timer = QTimer(self)
-        self._drain_timer.setTimerType(Qt.PreciseTimer)
+        self._drain_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._drain_timer.timeout.connect(self._drain)
 
     # ── Qt GL lifecycle ──────────────────────────────────────────────────────

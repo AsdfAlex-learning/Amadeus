@@ -201,7 +201,7 @@ def motion_to_gif(
     W, H = 480, 320
     frames = []
     for t in range(T):
-        img = Image.new("RGB", (W, H), (245, 245, 245))
+        img = Image.new("RGB", (W, H), "#f5f5f5")
         # Draw a simple bar chart for the selected parameters
         n = len(param_subset)
         bar_w = W / (n + 1)

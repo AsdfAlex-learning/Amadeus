@@ -65,7 +65,7 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y portaudio19-dev
+          sudo apt-get install -y portaudio19-dev libegl1 libgl1 libxkbcommon-x11-0
 
       - name: Install Python deps
         run: pip install -r requirements-lock.txt basedpyright==1.40.2
@@ -102,7 +102,7 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y portaudio19-dev
+          sudo apt-get install -y portaudio19-dev libegl1 libgl1 libxkbcommon-x11-0
 
       - name: Install Python deps
         run: pip install -r requirements-lock.txt pytest==9.1.1 pytest-cov==7.1.0
