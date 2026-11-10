@@ -76,6 +76,7 @@ target-version = ["py311"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+faulthandler_timeout = 120
 
 # basedpyright is a real CI gate on errors (`--level error`). The remaining
 # warnings are import-resolution / third-party stub noise; reportMissingImports

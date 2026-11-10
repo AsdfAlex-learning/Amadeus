@@ -115,7 +115,7 @@ jobs:
       # forces the offline encoder stubs, blocks the torchvision weight download
       # and runs Qt headless.
       - name: Run tests
-        run: pytest -q --cov=src --cov-report=term-missing
+        run: pytest -vv --cov=src --cov-report=term-missing
 
   test-windows:
     runs-on: windows-latest
@@ -134,4 +134,4 @@ jobs:
       - name: Run tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: pytest -q
+        run: pytest -vv
