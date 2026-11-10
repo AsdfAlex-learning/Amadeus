@@ -65,9 +65,7 @@ class DiffusionMotionInference:
         # When set, set_character_id() loads models/lora/<character_id>/lora_adapter.pt
         # after the base model is loaded. The default is "lora" under model_path.
         lora_cfg = motion_cfg.get("lora", {}) or {}
-        self.lora_root = Path(
-            lora_cfg.get("root", self.model_path / "lora")
-        )
+        self.lora_root = Path(lora_cfg.get("root", self.model_path / "lora"))
         self.lora_default_rank = int(lora_cfg.get("rank", 8))
         self.lora_default_alpha = float(lora_cfg.get("alpha", 16.0))
         self.lora_merge_on_load = bool(lora_cfg.get("merge_on_load", True))
@@ -134,6 +132,7 @@ class DiffusionMotionInference:
 
     def _detect_device(self) -> torch.device:
         import torch
+
         if torch.cuda.is_available():
             return torch.device("cuda")
         if torch.backends.mps.is_available():
@@ -197,6 +196,7 @@ class DiffusionMotionInference:
         if self._current_lora_id is not None and self._current_lora_id != character_id:
             try:
                 from src.motion.training.lora import remove_lora
+
                 remove_lora(self._model)
             except Exception as e:
                 logger.warning(f"Could not remove previous LoRA: {e}")
@@ -236,9 +236,7 @@ class DiffusionMotionInference:
             load_lora(self._model, adapter_path)
             if self.lora_merge_on_load:
                 merge_lora(self._model)
-                logger.info(
-                    f"LoRA merged into base weights for character {character_id}"
-                )
+                logger.info(f"LoRA merged into base weights for character {character_id}")
             self._current_lora_id = character_id
         except Exception as e:
             logger.error(f"Failed to load LoRA for character {character_id}: {e}")
@@ -583,9 +581,7 @@ class DiffusionMotionInference:
             if params is not None:
                 # C-8: per-persona multipliers are applied between the model and
                 # the renderer. Speak when speaking, otherwise Listen.
-                params = self._apply_performance(
-                    params, "speak" if speaking else "listen"
-                )
+                params = self._apply_performance(params, "speak" if speaking else "listen")
                 self._emit_params(params)
 
     def _prepare_visual_frames(self, audio_samples: int) -> np.ndarray:
@@ -657,7 +653,13 @@ class DiffusionMotionInference:
                 t_tensor = t.unsqueeze(0).expand(B)
                 alpha_t = torch.tensor(self._alphas_cumprod[t], device=self._device)
                 pred_x0 = self._model(
-                    user_wav, tts_wav, vis, prompts, id_tensor, t_tensor, x,
+                    user_wav,
+                    tts_wav,
+                    vis,
+                    prompts,
+                    id_tensor,
+                    t_tensor,
+                    x,
                     listen_feat=listen_feat,
                 )
                 sqrt_alpha_t = torch.sqrt(alpha_t)
@@ -671,7 +673,7 @@ class DiffusionMotionInference:
                 )
                 # η=0 → deterministic DDIM (no stochastic noise injection)
                 sigma_t = torch.tensor(0.0, device=self._device)
-                dir_xt = torch.sqrt((1.0 - alpha_prev - sigma_t ** 2).clamp(min=0.0)) * pred_eps
+                dir_xt = torch.sqrt((1.0 - alpha_prev - sigma_t**2).clamp(min=0.0)) * pred_eps
                 noise = torch.randn_like(x) if t_next > 0 else torch.zeros_like(x)
                 x = torch.sqrt(alpha_prev) * pred_x0 + dir_xt + sigma_t * noise
 
@@ -704,9 +706,7 @@ class DiffusionMotionInference:
             candidate = Path(__file__).resolve().parents[2] / mapping_path
             if candidate.exists():
                 mapping_path = candidate
-        return PerformanceEngine(
-            PerformanceConfig.from_dict(perf_cfg), mapping_path=mapping_path
-        )
+        return PerformanceEngine(PerformanceConfig.from_dict(perf_cfg), mapping_path=mapping_path)
 
     def _apply_performance(self, params: np.ndarray, mode: str) -> np.ndarray:
         """Apply per-persona multipliers to the raw model output. (C-8)"""

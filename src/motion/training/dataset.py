@@ -106,7 +106,9 @@ class MotionDataset(Dataset):
     def _get_npz_item(self, sample: dict) -> dict[str, torch.Tensor]:
         data = np.load(str(sample["npz_path"]), allow_pickle=False)
         live2d_params = data["live2d_params"]  # (T, 45)
-        head_angles = data.get("head_angles", np.zeros((live2d_params.shape[0], 3), dtype=np.float32))
+        head_angles = data.get(
+            "head_angles", np.zeros((live2d_params.shape[0], 3), dtype=np.float32)
+        )
         identity_id = int(data.get("identity_id", 0))
         # C2 fix: the preprocessing pipeline extracts frames at a configurable
         # fps (default 25). The model, however, operates at 50Hz (aligned with
@@ -129,15 +131,17 @@ class MotionDataset(Dataset):
 
         if max_chunks == 0:
             audio_chunk = np.zeros(self.chunk_samples, dtype=np.float32)
-            motion_chunk = np.zeros((self.chunk_motion_frames, self.num_live2d_params), dtype=np.float32)
+            motion_chunk = np.zeros(
+                (self.chunk_motion_frames, self.num_live2d_params), dtype=np.float32
+            )
             head_chunk = np.zeros((self.chunk_motion_frames, 3), dtype=np.float32)
         else:
             start_chunk = np.random.randint(0, max(1, max_chunks))
             audio_start = start_chunk * self.chunk_samples
             motion_start = start_chunk * self.chunk_motion_frames
-            audio_chunk = audio[audio_start:audio_start + self.chunk_samples]
-            motion_chunk = live2d_params[motion_start:motion_start + self.chunk_motion_frames]
-            head_chunk = head_angles[motion_start:motion_start + self.chunk_motion_frames]
+            audio_chunk = audio[audio_start : audio_start + self.chunk_samples]
+            motion_chunk = live2d_params[motion_start : motion_start + self.chunk_motion_frames]
+            head_chunk = head_angles[motion_start : motion_start + self.chunk_motion_frames]
 
         # Pad if needed
         if len(audio_chunk) < self.chunk_samples:
@@ -188,8 +192,8 @@ class MotionDataset(Dataset):
             start_chunk = np.random.randint(0, max(1, max_chunks))
             audio_start = start_chunk * self.chunk_samples
             motion_start = start_chunk * self.chunk_motion_frames
-            audio_chunk = audio[audio_start:audio_start + self.chunk_samples]
-            motion_chunk = motion[motion_start:motion_start + self.chunk_motion_frames]
+            audio_chunk = audio[audio_start : audio_start + self.chunk_samples]
+            motion_chunk = motion[motion_start : motion_start + self.chunk_motion_frames]
 
         if len(audio_chunk) < self.chunk_samples:
             audio_chunk = np.pad(audio_chunk, (0, self.chunk_samples - len(audio_chunk)))
@@ -230,10 +234,12 @@ class MotionDataset(Dataset):
     def _load_audio(self, path: Path) -> np.ndarray:
         try:
             import soundfile as sf
+
             audio, sr = sf.read(str(path))
             if sr != self.sample_rate:
                 try:
                     import librosa
+
                     audio = librosa.resample(audio, orig_sr=sr, target_sr=self.sample_rate)
                 except ImportError:
                     logger.warning("librosa not installed, skipping resample")
@@ -250,6 +256,7 @@ class MotionDataset(Dataset):
         Use: python -m src.motion.preprocess.pipeline <video_dir> --output_dir <output_dir>
         """
         from src.motion.preprocess.pipeline import PreprocessPipeline
+
         pipeline = PreprocessPipeline()
         results = pipeline.process_directory(video_dir, output_dir)
         pipeline.cleanup()

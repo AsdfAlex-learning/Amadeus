@@ -182,9 +182,7 @@ class CameraPerception:
             left_eye_gap = float(np.linalg.norm(landmarks[159][:2] - landmarks[145][:2]))
             # Right eye: upper 386, lower 374
             right_eye_gap = float(np.linalg.norm(landmarks[386][:2] - landmarks[374][:2]))
-            result["eye_openness_l"] = float(
-                np.clip(left_eye_gap / (face_height * 0.05), 0.0, 1.0)
-            )
+            result["eye_openness_l"] = float(np.clip(left_eye_gap / (face_height * 0.05), 0.0, 1.0))
             result["eye_openness_r"] = float(
                 np.clip(right_eye_gap / (face_height * 0.05), 0.0, 1.0)
             )
@@ -235,9 +233,13 @@ class CameraPerception:
             left_eye_width = float(np.linalg.norm(left_eye_outer[:2] - left_eye_inner[:2]))
             if left_eye_width > 1e-6:
                 # Position of iris along eye width (0 outer .. 1 inner)
-                rel = (left_iris[0] - left_eye_outer[0]) / (left_eye_inner[0] - left_eye_outer[0] + 1e-6)
+                rel = (left_iris[0] - left_eye_outer[0]) / (
+                    left_eye_inner[0] - left_eye_outer[0] + 1e-6
+                )
                 if rel < 0.35:
-                    result["gaze_direction"] = "right"  # mirrored: outer is screen-right for left eye
+                    result["gaze_direction"] = (
+                        "right"  # mirrored: outer is screen-right for left eye
+                    )
                 elif rel > 0.65:
                     result["gaze_direction"] = "left"
                 else:

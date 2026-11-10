@@ -13,7 +13,7 @@ has no extra installation requirement.
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
@@ -64,7 +64,9 @@ class EMAModel:
             shadow.mul_(self.decay).add_(param.detach().float(), alpha=1.0 - self.decay)
 
     @torch.no_grad()
-    def copy_to(self, model: nn.Module, store_original: bool = False) -> dict[str, torch.Tensor] | None:
+    def copy_to(
+        self, model: nn.Module, store_original: bool = False
+    ) -> dict[str, torch.Tensor] | None:
         """Replace the model's trainable parameters with the EMA weights.
 
         If `store_original=True`, the original parameters are returned so
@@ -101,7 +103,7 @@ class EMAModel:
             if k in self.shadow:
                 self.shadow[k] = v.to(self.shadow[k].device)
 
-    def to(self, device: torch.device) -> "EMAModel":
+    def to(self, device: torch.device) -> EMAModel:
         self.shadow = {k: v.to(device) for k, v in self.shadow.items()}
         return self
 

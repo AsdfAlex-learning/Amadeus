@@ -190,9 +190,7 @@ class AudioPipeline:
         if self._asr_worker is not None and self._asr_worker.is_alive():
             return
         self._asr_stop.clear()
-        self._asr_worker = threading.Thread(
-            target=self._asr_loop, name="amadeus-asr", daemon=True
-        )
+        self._asr_worker = threading.Thread(target=self._asr_loop, name="amadeus-asr", daemon=True)
         self._asr_worker.start()
 
     def _stop_asr_worker(self):

@@ -9,33 +9,66 @@ Generates:
 The visualizer is lightweight (matplotlib + Pillow only) and runs on CPU
 so it does not compete with training for GPU memory.
 """
+
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import re
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")  # non-interactive
 import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 
 LIVE2D_PARAM_NAMES = [
-    "ParamAngleX", "ParamAngleY", "ParamAngleZ",
-    "ParamBodyAngleX", "ParamBodyAngleY", "ParamBodyAngleZ",
-    "ParamEyeLOpen", "ParamEyeROpen", "ParamEyeBallX", "ParamEyeBallY",
-    "ParamBrowLX", "ParamBrowLY", "ParamBrowRX", "ParamBrowRY",
-    "ParamMouthOpenY", "ParamMouthForm", "ParamCheek", "ParamBreath",
-    "ParamArmLX", "ParamArmLY", "ParamArmRX", "ParamArmRY",
-    "ParamHairFront", "ParamHairBack", "ParamHairSideL", "ParamHairSideR",
-    "ParamTear", "ParamBlush", "ParamNose",
-    "ParamLipUpper", "ParamLipLower", "ParamTongue",
-    "ParamEarL", "ParamEarR", "ParamTail", "ParamWingL", "ParamWingR",
-    "ParamItem1", "ParamItem2", "ParamItem3",
-    "ParamExtra1", "ParamExtra2", "ParamExtra3", "ParamExtra4", "ParamExtra5",
+    "ParamAngleX",
+    "ParamAngleY",
+    "ParamAngleZ",
+    "ParamBodyAngleX",
+    "ParamBodyAngleY",
+    "ParamBodyAngleZ",
+    "ParamEyeLOpen",
+    "ParamEyeROpen",
+    "ParamEyeBallX",
+    "ParamEyeBallY",
+    "ParamBrowLX",
+    "ParamBrowLY",
+    "ParamBrowRX",
+    "ParamBrowRY",
+    "ParamMouthOpenY",
+    "ParamMouthForm",
+    "ParamCheek",
+    "ParamBreath",
+    "ParamArmLX",
+    "ParamArmLY",
+    "ParamArmRX",
+    "ParamArmRY",
+    "ParamHairFront",
+    "ParamHairBack",
+    "ParamHairSideL",
+    "ParamHairSideR",
+    "ParamTear",
+    "ParamBlush",
+    "ParamNose",
+    "ParamLipUpper",
+    "ParamLipLower",
+    "ParamTongue",
+    "ParamEarL",
+    "ParamEarR",
+    "ParamTail",
+    "ParamWingL",
+    "ParamWingR",
+    "ParamItem1",
+    "ParamItem2",
+    "ParamItem3",
+    "ParamExtra1",
+    "ParamExtra2",
+    "ParamExtra3",
+    "ParamExtra4",
+    "ParamExtra5",
 ]
 assert len(LIVE2D_PARAM_NAMES) == 45
 
@@ -54,7 +87,6 @@ def parse_train_log(log_path: Path) -> tuple[list[int], list[float], list[float]
         if not m:
             continue
         ep = int(m.group(1))
-        total = int(m.group(2))
         tl = float(m.group(3))
         lr = float(m.group(4))
         vl = float(m.group(5)) if m.group(5) else float("nan")
@@ -104,7 +136,9 @@ def plot_motion_comparison(
     ground_truth, predicted: (T, 45) arrays in [0, 1].
     """
     T, P = ground_truth.shape
-    assert predicted.shape == (T, P), f"shape mismatch: gt {ground_truth.shape}, pred {predicted.shape}"
+    assert predicted.shape == (T, P), (
+        f"shape mismatch: gt {ground_truth.shape}, pred {predicted.shape}"
+    )
     assert P == 45
 
     n_panels = (P + max_params_per_panel - 1) // max_params_per_panel
@@ -132,7 +166,13 @@ def plot_motion_comparison(
         axes[r][c].set_visible(False)
 
     # Legend once
-    fig.legend(["ground truth", "predicted"], loc="upper center", ncol=2, frameon=False, bbox_to_anchor=(0.5, 1.02))
+    fig.legend(
+        ["ground truth", "predicted"],
+        loc="upper center",
+        ncol=2,
+        frameon=False,
+        bbox_to_anchor=(0.5, 1.02),
+    )
     fig.suptitle(title, fontsize=11)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -172,14 +212,13 @@ def motion_to_gif(
             y1 = int(H * (1 - v))
             # Simple bar via Pillow
             from PIL import ImageDraw
+
             d = ImageDraw.Draw(img)
             d.rectangle([x0, y1, x1, H - 30], fill=(74, 144, 217))
         frames.append(img)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     duration_ms = max(20, 1000 // fps)
-    frames[0].save(
-        out_path, save_all=True, append_images=frames[1:], loop=0, duration=duration_ms
-    )
+    frames[0].save(out_path, save_all=True, append_images=frames[1:], loop=0, duration=duration_ms)
     print(f"  wrote {out_path} ({len(frames)} frames @ {fps} fps)")
 
 
@@ -191,19 +230,20 @@ def main():
     p_loss.add_argument("--log", type=Path, required=True)
     p_loss.add_argument("--out", type=Path, required=True)
 
-    p_motion = sub.add_parser(
-        "motion", help="Compare ground truth vs predicted motion"
+    p_motion = sub.add_parser("motion", help="Compare ground truth vs predicted motion")
+    p_motion.add_argument(
+        "--gt_npz", type=Path, required=True, help="Path to .npz with 'live2d_params' key"
     )
-    p_motion.add_argument("--gt_npz", type=Path, required=True,
-                          help="Path to .npz with 'live2d_params' key")
-    p_motion.add_argument("--pred_npy", type=Path, required=True,
-                          help="Path to .npy (T, 45) with predicted params")
+    p_motion.add_argument(
+        "--pred_npy", type=Path, required=True, help="Path to .npy (T, 45) with predicted params"
+    )
     p_motion.add_argument("--out", type=Path, required=True)
     p_motion.add_argument("--fps", type=int, default=50)
 
     p_gif = sub.add_parser("gif", help="Animate one motion sequence as a GIF")
-    p_gif.add_argument("--input", type=Path, required=True,
-                       help="Path to .npz or .npy motion sequence")
+    p_gif.add_argument(
+        "--input", type=Path, required=True, help="Path to .npz or .npy motion sequence"
+    )
     p_gif.add_argument("--out", type=Path, required=True)
     p_gif.add_argument("--fps", type=int, default=30)
 

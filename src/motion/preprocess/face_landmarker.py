@@ -12,29 +12,59 @@ from pathlib import Path
 import numpy as np
 from loguru import logger
 
-
 ARKIT_BLENDSHAPE_NAMES = [
-    "browDownLeft", "browDownRight", "browInnerUp",
-    "browOuterUpLeft", "browOuterUpRight",
-    "cheekPuff", "cheekSquintLeft", "cheekSquintRight",
-    "eyeBlinkLeft", "eyeBlinkRight",
-    "eyeLookDownLeft", "eyeLookDownRight",
-    "eyeLookInLeft", "eyeLookInRight",
-    "eyeLookOutLeft", "eyeLookOutRight",
-    "eyeLookUpLeft", "eyeLookUpRight",
-    "eyeSquintLeft", "eyeSquintRight",
-    "eyeWideLeft", "eyeWideRight",
-    "jawForward", "jawLeft", "jawOpen", "jawRight",
-    "mouthClose", "mouthDimpleLeft", "mouthDimpleRight",
-    "mouthFrownLeft", "mouthFrownRight", "mouthFunnel", "mouthLeft",
-    "mouthLowerDownLeft", "mouthLowerDownRight",
-    "mouthPressLeft", "mouthPressRight", "mouthPucker",
-    "mouthRight", "mouthRollLower", "mouthRollUpper",
-    "mouthShrugLower", "mouthShrugUpper",
-    "mouthSmileLeft", "mouthSmileRight",
-    "mouthStretchLeft", "mouthStretchRight",
-    "mouthUpperUpLeft", "mouthUpperUpRight",
-    "noseSneerLeft", "noseSneerRight", "tongueOut",
+    "browDownLeft",
+    "browDownRight",
+    "browInnerUp",
+    "browOuterUpLeft",
+    "browOuterUpRight",
+    "cheekPuff",
+    "cheekSquintLeft",
+    "cheekSquintRight",
+    "eyeBlinkLeft",
+    "eyeBlinkRight",
+    "eyeLookDownLeft",
+    "eyeLookDownRight",
+    "eyeLookInLeft",
+    "eyeLookInRight",
+    "eyeLookOutLeft",
+    "eyeLookOutRight",
+    "eyeLookUpLeft",
+    "eyeLookUpRight",
+    "eyeSquintLeft",
+    "eyeSquintRight",
+    "eyeWideLeft",
+    "eyeWideRight",
+    "jawForward",
+    "jawLeft",
+    "jawOpen",
+    "jawRight",
+    "mouthClose",
+    "mouthDimpleLeft",
+    "mouthDimpleRight",
+    "mouthFrownLeft",
+    "mouthFrownRight",
+    "mouthFunnel",
+    "mouthLeft",
+    "mouthLowerDownLeft",
+    "mouthLowerDownRight",
+    "mouthPressLeft",
+    "mouthPressRight",
+    "mouthPucker",
+    "mouthRight",
+    "mouthRollLower",
+    "mouthRollUpper",
+    "mouthShrugLower",
+    "mouthShrugUpper",
+    "mouthSmileLeft",
+    "mouthSmileRight",
+    "mouthStretchLeft",
+    "mouthStretchRight",
+    "mouthUpperUpLeft",
+    "mouthUpperUpRight",
+    "noseSneerLeft",
+    "noseSneerRight",
+    "tongueOut",
 ]
 
 NUM_BLENDSHAPES = len(ARKIT_BLENDSHAPE_NAMES)  # 52
@@ -76,6 +106,7 @@ class FaceLandmarkerExtractor:
 
     def _init_tasks_api(self):
         from mediapipe.tasks.python import BaseOptions, vision
+
         model_path = self._ensure_model()
         base_options = BaseOptions(model_asset_path=str(model_path), delegate=self._delegate)
         options = vision.FaceLandmarkerOptions(
@@ -88,9 +119,13 @@ class FaceLandmarkerExtractor:
 
     def _init_legacy(self):
         import mediapipe as mp
+
         self._legacy_face_mesh = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=False, max_num_faces=1, refine_landmarks=True,
-            min_detection_confidence=0.5, min_tracking_confidence=0.5,
+            static_image_mode=False,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
         )
 
     def _ensure_model(self) -> Path:
@@ -125,7 +160,9 @@ class FaceLandmarkerExtractor:
         """
         default = {
             "blendshapes": np.zeros(NUM_BLENDSHAPES, dtype=np.float32),
-            "head_pitch": 0.0, "head_yaw": 0.0, "head_roll": 0.0,
+            "head_pitch": 0.0,
+            "head_yaw": 0.0,
+            "head_roll": 0.0,
             "face_detected": False,
         }
         if self._use_tasks_api and self._landmarker is not None:
@@ -136,6 +173,7 @@ class FaceLandmarkerExtractor:
 
     def _process_frame_tasks(self, frame: np.ndarray, default: dict) -> dict:
         import mediapipe as mp
+
         # Ensure uint8 contiguous memory layout; some videos may surface
         # a non-contiguous slice which mediapipe rejects.
         frame_rgb = np.ascontiguousarray(frame[:, :, ::-1], dtype=np.uint8)
@@ -151,11 +189,17 @@ class FaceLandmarkerExtractor:
         if result.facial_transformation_matrixes:
             matrix = np.array(result.facial_transformation_matrixes[0]).reshape(4, 4)
             head_pitch, head_yaw, head_roll = self._decompose_rotation(matrix)
-        return {"blendshapes": blendshapes, "head_pitch": head_pitch,
-                "head_yaw": head_yaw, "head_roll": head_roll, "face_detected": True}
+        return {
+            "blendshapes": blendshapes,
+            "head_pitch": head_pitch,
+            "head_yaw": head_yaw,
+            "head_roll": head_roll,
+            "face_detected": True,
+        }
 
     def _process_frame_legacy(self, frame: np.ndarray, default: dict) -> dict:
         import cv2
+
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_result = self._legacy_face_mesh.process(frame_rgb)
         if not mp_result.multi_face_landmarks:
@@ -163,11 +207,17 @@ class FaceLandmarkerExtractor:
         face = mp_result.multi_face_landmarks[0]
         h, w = frame.shape[:2]
         landmarks = np.array(
-            [[lm.x * w, lm.y * h, lm.z * w] for lm in face.landmark], dtype=np.float32)
+            [[lm.x * w, lm.y * h, lm.z * w] for lm in face.landmark], dtype=np.float32
+        )
         blendshapes = self._landmarks_to_blendshapes(landmarks)
         head_pitch, head_yaw, head_roll = self._estimate_head_pose(landmarks)
-        return {"blendshapes": blendshapes, "head_pitch": head_pitch,
-                "head_yaw": head_yaw, "head_roll": head_roll, "face_detected": True}
+        return {
+            "blendshapes": blendshapes,
+            "head_pitch": head_pitch,
+            "head_yaw": head_yaw,
+            "head_roll": head_roll,
+            "face_detected": True,
+        }
 
     # ── Blendshape approximation from landmarks (legacy fallback) ──
 
@@ -253,6 +303,7 @@ class FaceLandmarkerExtractor:
     def process_video(self, video_path: str | Path, fps: float | None = None) -> dict:
         """Process entire video, extracting blendshapes for every frame."""
         from src.motion.preprocess.video_reader import VideoReader
+
         video_path = Path(video_path)
         reader = VideoReader(video_path, fps=fps)
         all_blendshapes = []
@@ -262,8 +313,7 @@ class FaceLandmarkerExtractor:
         for frame in reader.iter_frames(fps=fps):
             result = self.process_frame(frame)
             all_blendshapes.append(result["blendshapes"])
-            all_head_angles.append(
-                [result["head_pitch"], result["head_yaw"], result["head_roll"]])
+            all_head_angles.append([result["head_pitch"], result["head_yaw"], result["head_roll"]])
             if not result["face_detected"]:
                 bad_frames.append(frame_idx)
             frame_idx += 1
@@ -274,10 +324,12 @@ class FaceLandmarkerExtractor:
             return {
                 "blendshapes": np.zeros((0, NUM_BLENDSHAPES), dtype=np.float32),
                 "head_angles": np.zeros((0, 3), dtype=np.float32),
-                "bad_frames": [], "fps": fps or 25.0,
+                "bad_frames": [],
+                "fps": fps or 25.0,
             }
-        logger.info(f"Processed {frame_idx} frames from {video_path.name} "
-                     f"({len(bad_frames)} bad frames)")
+        logger.info(
+            f"Processed {frame_idx} frames from {video_path.name} ({len(bad_frames)} bad frames)"
+        )
         return {
             "blendshapes": np.stack(all_blendshapes),
             "head_angles": np.stack(all_head_angles).astype(np.float32),

@@ -170,14 +170,14 @@ class AudioRing:
         if count <= 0:
             return
         if count > self._capacity:
-            data = data[count - self._capacity:]
+            data = data[count - self._capacity :]
             count = self._capacity
 
         start = self._written_total % self._capacity
         first = min(count, self._capacity - start)
-        self._buf[start:start + first] = data[:first]
+        self._buf[start : start + first] = data[:first]
         if first < count:
-            self._buf[:count - first] = data[first:]
+            self._buf[: count - first] = data[first:]
         self._written_total += count
 
     def read(self, count: int) -> np.ndarray:
@@ -203,9 +203,9 @@ class AudioRing:
         start = self._read_total % self._capacity
         first = min(take, self._capacity - start)
         out = np.empty(take, dtype=self._buf.dtype)
-        out[:first] = self._buf[start:start + first]
+        out[:first] = self._buf[start : start + first]
         if first < take:
-            out[first:] = self._buf[:take - first]
+            out[first:] = self._buf[: take - first]
         self._read_total += take
         return out
 

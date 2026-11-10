@@ -26,7 +26,6 @@ import torch
 import torch.nn as nn
 from loguru import logger
 
-
 # ═══════════════════════════════════════════════════════════════
 # LoRA Modules
 # ═══════════════════════════════════════════════════════════════
@@ -61,14 +60,18 @@ class LoRALinear(nn.Module):
             self.bias = None
 
         # LoRA matrices
-        self.lora_A = nn.Parameter(torch.empty(rank, self.in_features, device=original.weight.device))
-        self.lora_B = nn.Parameter(torch.zeros(self.out_features, rank, device=original.weight.device))
+        self.lora_A = nn.Parameter(
+            torch.empty(rank, self.in_features, device=original.weight.device)
+        )
+        self.lora_B = nn.Parameter(
+            torch.zeros(self.out_features, rank, device=original.weight.device)
+        )
 
         # Dropout on input before LoRA path
         self.lora_dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
 
         # Kaiming init for A, zeros for B (starts as zero LoRA contribution)
-        nn.init.kaiming_uniform_(self.lora_A, a=5 ** 0.5)
+        nn.init.kaiming_uniform_(self.lora_A, a=5**0.5)
 
         # Store original dtype for consistent output
         self._dtype = original.weight.dtype
@@ -88,7 +91,9 @@ class LoRALinear(nn.Module):
         """Merge LoRA weights into base weight (in-place). After this, forward
         only uses the merged weight — call once before deployment."""
         with torch.no_grad():
-            self.weight.data += (self.scaling * self.lora_B.data @ self.lora_A.data).to(self.weight.dtype)
+            self.weight.data += (self.scaling * self.lora_B.data @ self.lora_A.data).to(
+                self.weight.dtype
+            )
             # Zero out LoRA so forward is a no-op
             self.lora_A.data.zero_()
             self.lora_B.data.zero_()
@@ -112,10 +117,18 @@ class LoRAConv1d(nn.Module):
         super().__init__()
         self.in_channels = original.in_channels
         self.out_channels = original.out_channels
-        self.kernel_size = original.kernel_size[0] if isinstance(original.kernel_size, tuple) else original.kernel_size
+        self.kernel_size = (
+            original.kernel_size[0]
+            if isinstance(original.kernel_size, tuple)
+            else original.kernel_size
+        )
         self.stride = original.stride[0] if isinstance(original.stride, tuple) else original.stride
-        self.padding = original.padding[0] if isinstance(original.padding, tuple) else original.padding
-        self.dilation = original.dilation[0] if isinstance(original.dilation, tuple) else original.dilation
+        self.padding = (
+            original.padding[0] if isinstance(original.padding, tuple) else original.padding
+        )
+        self.dilation = (
+            original.dilation[0] if isinstance(original.dilation, tuple) else original.dilation
+        )
         self.groups = original.groups
         self.rank = rank
         self.alpha = alpha
@@ -137,7 +150,7 @@ class LoRAConv1d(nn.Module):
 
         self.lora_dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
 
-        nn.init.kaiming_uniform_(self.lora_A.view(rank, -1), a=5 ** 0.5)
+        nn.init.kaiming_uniform_(self.lora_A.view(rank, -1), a=5**0.5)
         self._dtype = original.weight.dtype
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -148,11 +161,19 @@ class LoRAConv1d(nn.Module):
 
         # LoRA path: lora_B @ lora_A reshaped to (out_channels, in_channels/groups, kernel_size)
         dropped = self.lora_dropout(x)
-        lora_kernel = (self.lora_B @ self.lora_A).view(
-            self.out_channels, self.in_channels // self.groups, self.kernel_size
-        ).to(self.weight.device)
+        lora_kernel = (
+            (self.lora_B @ self.lora_A)
+            .view(self.out_channels, self.in_channels // self.groups, self.kernel_size)
+            .to(self.weight.device)
+        )
         lora_out = nn.functional.conv1d(
-            dropped.to(lora_kernel.device), lora_kernel * self.scaling, None, self.stride, self.padding, self.dilation, self.groups
+            dropped.to(lora_kernel.device),
+            lora_kernel * self.scaling,
+            None,
+            self.stride,
+            self.padding,
+            self.dilation,
+            self.groups,
         )
         result = result + lora_out.to(result.device)
 
@@ -164,7 +185,9 @@ class LoRAConv1d(nn.Module):
             lora_kernel = (self.lora_B @ self.lora_A).view(
                 self.out_channels, self.in_channels // self.groups, self.kernel_size
             )
-            self.weight.data += (self.scaling * lora_kernel).to(self.weight.device).to(self.weight.dtype)
+            self.weight.data += (
+                (self.scaling * lora_kernel).to(self.weight.device).to(self.weight.dtype)
+            )
             self.lora_A.data.zero_()
             self.lora_B.data.zero_()
 
@@ -189,7 +212,7 @@ def _match_module_name(name: str, patterns: list[str]) -> bool:
         if re.fullmatch(regex_pattern, name):
             return True
         # Parent match: pattern is a prefix of the module path
-        if name.startswith(pattern.replace("*", "") ) and pattern.endswith("*"):
+        if name.startswith(pattern.replace("*", "")) and pattern.endswith("*"):
             if re.fullmatch(regex_pattern + r"\..*", name):
                 return True
         # Simple prefix match: "dit_blocks" matches "dit_blocks.0.ffn"
@@ -259,7 +282,9 @@ def apply_lora(model: nn.Module, config: dict[str, Any] | None = None) -> dict[s
         # Default: target all Linear/Conv1d in dit_blocks, output_head, and projection layers
         # Skip encoder internals (audio_encoder, visual_encoder, text_encoder)
         default_prefixes = ["dit_blocks.", "output_head.", "audio_proj.", "cross_proj."]
-        target_names = [n for n in all_linear_conv if any(n.startswith(p) for p in default_prefixes)]
+        target_names = [
+            n for n in all_linear_conv if any(n.startswith(p) for p in default_prefixes)
+        ]
 
     replaced = {}
     for name in target_names:
@@ -328,7 +353,8 @@ def remove_lora(model: nn.Module) -> dict[str, Any]:
         module = dict(model.named_modules())[name]
         if isinstance(module, LoRALinear):
             original_linear = nn.Linear(
-                module.in_features, module.out_features,
+                module.in_features,
+                module.out_features,
                 bias=module.bias is not None,
                 device=module.weight.device,
             )
@@ -343,9 +369,13 @@ def remove_lora(model: nn.Module) -> dict[str, Any]:
             removed += 1
         elif isinstance(module, LoRAConv1d):
             original_conv = nn.Conv1d(
-                module.in_channels, module.out_channels,
-                module.kernel_size, module.stride, module.padding,
-                module.dilation, module.groups,
+                module.in_channels,
+                module.out_channels,
+                module.kernel_size,
+                module.stride,
+                module.padding,
+                module.dilation,
+                module.groups,
                 bias=module.bias is not None,
                 device=module.weight.device,
             )

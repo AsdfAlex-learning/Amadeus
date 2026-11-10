@@ -164,7 +164,9 @@ class TextEncoder(nn.Module):
             # so a half-precision projection was fed float32 and the Linear raised
             # a dtype mismatch.
             dummy = torch.zeros(
-                len(texts), self.proj.in_features, device=device,
+                len(texts),
+                self.proj.in_features,
+                device=device,
                 dtype=self.proj.weight.dtype,
             )
             return self.proj(dummy)
@@ -448,8 +450,7 @@ class FullDuplexDiT(nn.Module):
             idx = torch.searchsorted(t_in, t_out)
             idx = idx.clamp(max=t_ - 1)
             idx_prev = (idx - 1).clamp(min=0)
-            w = ((t_out - t_in[idx_prev]) /
-                 (t_in[idx] - t_in[idx_prev] + 1e-8)).unsqueeze(-1)
+            w = ((t_out - t_in[idx_prev]) / (t_in[idx] - t_in[idx_prev] + 1e-8)).unsqueeze(-1)
             return ((1 - w) * xf[:, idx_prev, :] + w * xf[:, idx, :]).to(out_dtype)
 
         listen_feat = _resample_time(listen_feat, T)
@@ -466,9 +467,7 @@ class FullDuplexDiT(nn.Module):
         # We use bernoulli-based masking rather than `.item()` because
         # `.item()` synchronizes the GPU and breaks the autograd graph.
         if self.training:
-            keep = torch.bernoulli(
-                torch.full((B, 1, 1), 0.5, device=device)
-            )  # 0 = drop, 1 = keep
+            keep = torch.bernoulli(torch.full((B, 1, 1), 0.5, device=device))  # 0 = drop, 1 = keep
             visual_feat = visual_feat * keep
 
         # Align the temporal axis of all conditioning features to T. The

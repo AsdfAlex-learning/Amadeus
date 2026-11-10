@@ -67,13 +67,15 @@ def train(
     # Train/val split
     val_size = max(1, int(len(full_dataset) * val_split)) if val_split > 0 else 0
     train_size = len(full_dataset) - val_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        full_dataset, [train_size, val_size]
-    )
+    train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
     logger.info(f"Dataset: {train_size} train / {val_size} val samples")
 
     dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0) if val_size > 0 else None
+    val_loader = (
+        DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+        if val_size > 0
+        else None
+    )
     model = FullDuplexDiT(
         num_params=num_params,
         hidden_dim=hidden_dim,
@@ -93,9 +95,7 @@ def train(
             if isinstance(state, dict) and "model" in state:
                 model.load_state_dict(state["model"])
                 start_epoch = int(state.get("epoch", 0)) + 1
-                logger.info(
-                    f"Resumed full state from {resume_path} (epoch {start_epoch})"
-                )
+                logger.info(f"Resumed full state from {resume_path} (epoch {start_epoch})")
                 # Optimizer and scheduler are restored after they are created.
                 _resume_state = state
             else:
@@ -105,9 +105,7 @@ def train(
                     start_epoch = int(resume_path.stem.split("_")[-1]) + 1
                 except ValueError:
                     start_epoch = 0
-                logger.info(
-                    f"Resumed legacy weights from {resume_path} (epoch {start_epoch})"
-                )
+                logger.info(f"Resumed legacy weights from {resume_path} (epoch {start_epoch})")
                 _resume_state = None
         else:
             logger.warning(f"Resume checkpoint not found: {resume_path}")
@@ -208,8 +206,12 @@ def train(
             motion = batch["motion"].to(device)
             B = audio.shape[0]
             tts_audio = batch.get("tts_audio", torch.zeros_like(audio)).to(device)
-            visual = batch.get("visual_frames", torch.zeros(B, 5, 3, 224, 224, device=device)).to(device)
-            identity = batch.get("identity_id", torch.zeros(B, dtype=torch.long, device=device)).to(device)
+            visual = batch.get("visual_frames", torch.zeros(B, 5, 3, 224, 224, device=device)).to(
+                device
+            )
+            identity = batch.get("identity_id", torch.zeros(B, dtype=torch.long, device=device)).to(
+                device
+            )
             prompts = batch.get("text_prompt", [""] * B)
             if isinstance(prompts, list):
                 pass  # already a list
@@ -272,13 +274,20 @@ def train(
                     audio = batch["user_audio"].to(device)
                     B = audio.shape[0]
                     tts_audio = batch.get("tts_audio", torch.zeros_like(audio)).to(device)
-                    visual = batch.get("visual_frames", torch.zeros(B, 5, 3, 224, 224, device=device)).to(device)
-                    identity = batch.get("identity_id", torch.zeros(B, dtype=torch.long, device=device)).to(device)
+                    visual = batch.get(
+                        "visual_frames", torch.zeros(B, 5, 3, 224, 224, device=device)
+                    ).to(device)
+                    identity = batch.get(
+                        "identity_id", torch.zeros(B, dtype=torch.long, device=device)
+                    ).to(device)
                     prompts = batch.get("text_prompt", [""] * B)
                     t = torch.randint(0, num_diffusion_steps, (B,), device=device)
                     noise = torch.randn_like(motion)
                     alpha_cumprod_t = _alphas_cumprod[t].unsqueeze(-1).unsqueeze(-1).to(device)
-                    noisy = torch.sqrt(alpha_cumprod_t) * motion + torch.sqrt(1.0 - alpha_cumprod_t) * noise
+                    noisy = (
+                        torch.sqrt(alpha_cumprod_t) * motion
+                        + torch.sqrt(1.0 - alpha_cumprod_t) * noise
+                    )
                     with torch.amp.autocast(device_type=device, enabled=scaler is not None):
                         pred = model(audio, tts_audio, visual, prompts, identity, t, noisy)
                         val_loss += criterion(pred, motion).item()
@@ -416,31 +425,60 @@ if __name__ == "__main__":
     parser.add_argument("--num_layers", type=int, default=4)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--no_amp", action="store_true")
-    parser.add_argument("--dataset_type", type=str, default="preprocessed",
-                        choices=["preprocessed", "mead", "biwi", "vocaset"],
-                        help="Dataset format type")
-    parser.add_argument("--val_split", type=float, default=0.1,
-                        help="Validation split ratio (0=no validation)")
-    parser.add_argument("--resume", type=str, default=None,
-                        help="Resume from checkpoint path")
-    parser.add_argument("--weight_decay", type=float, default=0.01,
-                        help="Weight decay (L2 regularization) for AdamW")
-    parser.add_argument("--warmup_steps", type=int, default=100,
-                        help="Linear warmup steps before cosine decay (0=disable)")
-    parser.add_argument("--early_stopping_patience", type=int, default=0,
-                        help="Stop if val loss does not improve for N epochs (0=disable)")
-    parser.add_argument("--ema_decay", type=float, default=0.0,
-                        help="EMA decay for trainable parameters (0=disable, 0.999 typical)")
-    parser.add_argument("--use_lora", action="store_true",
-                        help="Enable LoRA fine-tuning (freezes base model)")
-    parser.add_argument("--lora_rank", type=int, default=8,
-                        help="LoRA decomposition rank (default: 8)")
-    parser.add_argument("--lora_alpha", type=float, default=16.0,
-                        help="LoRA scaling factor (default: 16.0)")
-    parser.add_argument("--lora_dropout", type=float, default=0.0,
-                        help="LoRA dropout rate (default: 0.0)")
-    parser.add_argument("--lora_target_modules", type=str, nargs="*", default=None,
-                        help="Module name patterns for LoRA (e.g. dit_blocks output_head)")
+    parser.add_argument(
+        "--dataset_type",
+        type=str,
+        default="preprocessed",
+        choices=["preprocessed", "mead", "biwi", "vocaset"],
+        help="Dataset format type",
+    )
+    parser.add_argument(
+        "--val_split", type=float, default=0.1, help="Validation split ratio (0=no validation)"
+    )
+    parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint path")
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=0.01,
+        help="Weight decay (L2 regularization) for AdamW",
+    )
+    parser.add_argument(
+        "--warmup_steps",
+        type=int,
+        default=100,
+        help="Linear warmup steps before cosine decay (0=disable)",
+    )
+    parser.add_argument(
+        "--early_stopping_patience",
+        type=int,
+        default=0,
+        help="Stop if val loss does not improve for N epochs (0=disable)",
+    )
+    parser.add_argument(
+        "--ema_decay",
+        type=float,
+        default=0.0,
+        help="EMA decay for trainable parameters (0=disable, 0.999 typical)",
+    )
+    parser.add_argument(
+        "--use_lora", action="store_true", help="Enable LoRA fine-tuning (freezes base model)"
+    )
+    parser.add_argument(
+        "--lora_rank", type=int, default=8, help="LoRA decomposition rank (default: 8)"
+    )
+    parser.add_argument(
+        "--lora_alpha", type=float, default=16.0, help="LoRA scaling factor (default: 16.0)"
+    )
+    parser.add_argument(
+        "--lora_dropout", type=float, default=0.0, help="LoRA dropout rate (default: 0.0)"
+    )
+    parser.add_argument(
+        "--lora_target_modules",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Module name patterns for LoRA (e.g. dit_blocks output_head)",
+    )
     args = parser.parse_args()
 
     train(

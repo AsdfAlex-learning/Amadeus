@@ -10,22 +10,55 @@ import numpy as np
 import yaml
 from loguru import logger
 
-from src.motion.preprocess.face_landmarker import ARKIT_BLENDSHAPE_NAMES, _ARKIT_NAME_TO_IDX
+from src.motion.preprocess.face_landmarker import _ARKIT_NAME_TO_IDX
 
 # Canonical 45 Live2D parameter names — MUST match live2d_widget.py push_params LUT
 LIVE2D_PARAM_NAMES = [
-    "ParamAngleX", "ParamAngleY", "ParamAngleZ",
-    "ParamBodyAngleX", "ParamBodyAngleY", "ParamBodyAngleZ",
-    "ParamEyeLOpen", "ParamEyeROpen", "ParamEyeBallX", "ParamEyeBallY",
-    "ParamBrowLX", "ParamBrowLY", "ParamBrowRX", "ParamBrowRY",
-    "ParamMouthOpenY", "ParamMouthForm", "ParamCheek", "ParamBreath",
-    "ParamArmLX", "ParamArmLY", "ParamArmRX", "ParamArmRY",
-    "ParamHairFront", "ParamHairBack", "ParamHairSideL", "ParamHairSideR",
-    "ParamTear", "ParamBlush", "ParamNose",
-    "ParamLipUpper", "ParamLipLower", "ParamTongue",
-    "ParamEarL", "ParamEarR", "ParamTail", "ParamWingL", "ParamWingR",
-    "ParamItem1", "ParamItem2", "ParamItem3",
-    "ParamExtra1", "ParamExtra2", "ParamExtra3", "ParamExtra4", "ParamExtra5",
+    "ParamAngleX",
+    "ParamAngleY",
+    "ParamAngleZ",
+    "ParamBodyAngleX",
+    "ParamBodyAngleY",
+    "ParamBodyAngleZ",
+    "ParamEyeLOpen",
+    "ParamEyeROpen",
+    "ParamEyeBallX",
+    "ParamEyeBallY",
+    "ParamBrowLX",
+    "ParamBrowLY",
+    "ParamBrowRX",
+    "ParamBrowRY",
+    "ParamMouthOpenY",
+    "ParamMouthForm",
+    "ParamCheek",
+    "ParamBreath",
+    "ParamArmLX",
+    "ParamArmLY",
+    "ParamArmRX",
+    "ParamArmRY",
+    "ParamHairFront",
+    "ParamHairBack",
+    "ParamHairSideL",
+    "ParamHairSideR",
+    "ParamTear",
+    "ParamBlush",
+    "ParamNose",
+    "ParamLipUpper",
+    "ParamLipLower",
+    "ParamTongue",
+    "ParamEarL",
+    "ParamEarR",
+    "ParamTail",
+    "ParamWingL",
+    "ParamWingR",
+    "ParamItem1",
+    "ParamItem2",
+    "ParamItem3",
+    "ParamExtra1",
+    "ParamExtra2",
+    "ParamExtra3",
+    "ParamExtra4",
+    "ParamExtra5",
 ]
 
 NUM_LIVE2D_PARAMS = len(LIVE2D_PARAM_NAMES)  # 45
@@ -67,7 +100,11 @@ class ARKitToLive2DMapper:
         """
         single = blendshapes.ndim == 1
         if single:
-            blendshapes = blendshapes.unsqueeze(0) if hasattr(blendshapes, 'unsqueeze') else blendshapes[np.newaxis, :]
+            blendshapes = (
+                blendshapes.unsqueeze(0)
+                if hasattr(blendshapes, "unsqueeze")
+                else blendshapes[np.newaxis, :]
+            )
             head_angles = head_angles[np.newaxis, :]
 
         T = blendshapes.shape[0]
@@ -89,8 +126,7 @@ class ARKitToLive2DMapper:
                 # Support both "weight" and "scale" keys for compatibility
                 weight = float(rule.get("weight", rule.get("scale", 1.0)))
                 bias = float(rule.get("bias", 0.0))
-                result[:, param_idx] = np.clip(
-                    head_angles[:, angle_idx] * weight + bias, 0.0, 1.0)
+                result[:, param_idx] = np.clip(head_angles[:, angle_idx] * weight + bias, 0.0, 1.0)
 
             elif rule_type == "blendshape":
                 sources = rule.get("sources", [])

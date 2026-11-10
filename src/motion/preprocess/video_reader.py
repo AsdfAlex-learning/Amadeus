@@ -36,10 +36,18 @@ class VideoReader:
         try:
             result = subprocess.run(
                 [
-                    "ffprobe", "-v", "quiet", "-print_format", "json",
-                    "-show_format", "-show_streams", str(self.video_path),
+                    "ffprobe",
+                    "-v",
+                    "quiet",
+                    "-print_format",
+                    "json",
+                    "-show_format",
+                    "-show_streams",
+                    str(self.video_path),
                 ],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             probe = json.loads(result.stdout)
         except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
@@ -76,9 +84,7 @@ class VideoReader:
             "height": int(video_stream.get("height", 0)),
             "num_frames": int(video_stream.get("nb_frames", 0)),
             "has_audio": audio_stream is not None,
-            "audio_sample_rate": (
-                int(audio_stream["sample_rate"]) if audio_stream else 0
-            ),
+            "audio_sample_rate": (int(audio_stream["sample_rate"]) if audio_stream else 0),
             "codec": video_stream.get("codec_name", "unknown"),
         }
         return self._metadata
@@ -107,13 +113,20 @@ class VideoReader:
             }
         except ImportError:
             self._metadata = {
-                "fps": 30.0, "duration_sec": 0, "width": 0, "height": 0,
-                "num_frames": 0, "has_audio": False, "audio_sample_rate": 0,
+                "fps": 30.0,
+                "duration_sec": 0,
+                "width": 0,
+                "height": 0,
+                "num_frames": 0,
+                "has_audio": False,
+                "audio_sample_rate": 0,
                 "codec": "unknown",
             }
         return self._metadata
 
-    def extract_audio(self, output_path: str | Path | None = None, sample_rate: int = 16000) -> Path:
+    def extract_audio(
+        self, output_path: str | Path | None = None, sample_rate: int = 16000
+    ) -> Path:
         """Demux and resample audio to 16kHz mono wav.
 
         Args:
@@ -132,11 +145,22 @@ class VideoReader:
         try:
             subprocess.run(
                 [
-                    "ffmpeg", "-y", "-i", str(self.video_path),
-                    "-vn", "-ar", str(sample_rate), "-ac", "1",
-                    "-sample_fmt", "s16", str(output_path),
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(self.video_path),
+                    "-vn",
+                    "-ar",
+                    str(sample_rate),
+                    "-ac",
+                    "1",
+                    "-sample_fmt",
+                    "s16",
+                    str(output_path),
                 ],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
             if output_path.exists() and output_path.stat().st_size > 0:
                 logger.info(f"Audio extracted: {output_path}")
@@ -161,6 +185,7 @@ class VideoReader:
             if sr != sample_rate:
                 try:
                     import librosa
+
                     audio = librosa.resample(audio, orig_sr=sr, target_sr=sample_rate)
                 except ImportError:
                     logger.warning("librosa not installed, skipping resample")
@@ -173,6 +198,7 @@ class VideoReader:
             silence = np.zeros(int(duration * sample_rate), dtype=np.float32)
             try:
                 import soundfile as sf
+
                 sf.write(str(output_path), silence, sample_rate)
             except ImportError:
                 np.save(str(output_path).replace(".wav", ".npy"), silence)
@@ -197,11 +223,17 @@ class VideoReader:
         try:
             subprocess.run(
                 [
-                    "ffmpeg", "-y", "-i", str(self.video_path),
-                    "-vf", fps_filter,
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(self.video_path),
+                    "-vf",
+                    fps_filter,
                     str(output_dir / "frame_%06d.png"),
                 ],
-                capture_output=True, text=True, timeout=300,
+                capture_output=True,
+                text=True,
+                timeout=300,
             )
             frames = sorted(output_dir.glob("frame_*.png"))
             if frames:
@@ -258,10 +290,17 @@ class VideoReader:
         try:
             proc = subprocess.Popen(
                 [
-                    "ffmpeg", "-i", str(self.video_path),
+                    "ffmpeg",
+                    "-i",
+                    str(self.video_path),
                     *fps_arg,
-                    "-f", "rawvideo", "-pix_fmt", "bgr24",
-                    "-v", "quiet", "-",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "bgr24",
+                    "-v",
+                    "quiet",
+                    "-",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,

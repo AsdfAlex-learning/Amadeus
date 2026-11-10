@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 from loguru import logger
 
-from src.motion.preprocess.arkit_to_live2d import ARKitToLive2DMapper, NUM_LIVE2D_PARAMS
+from src.motion.preprocess.arkit_to_live2d import NUM_LIVE2D_PARAMS, ARKitToLive2DMapper
 from src.motion.preprocess.face_landmarker import FaceLandmarkerExtractor
 from src.motion.preprocess.video_reader import VideoReader
 
@@ -76,9 +76,7 @@ class PreprocessPipeline:
         # Check if too many bad frames
         bad_ratio = len(bad_frames) / T if T > 0 else 1.0
         if bad_ratio > 0.9:
-            logger.warning(
-                f"Too many bad frames ({bad_ratio:.0%}) in {video_path}, skipping"
-            )
+            logger.warning(f"Too many bad frames ({bad_ratio:.0%}) in {video_path}, skipping")
             return None
 
         # 3. Map ARKit -> Live2D params
@@ -143,10 +141,7 @@ class PreprocessPipeline:
         output_dir = Path(output_dir)
 
         # Find video files
-        videos = sorted(
-            p for p in video_dir.iterdir()
-            if p.suffix.lower() in VIDEO_EXTENSIONS
-        )
+        videos = sorted(p for p in video_dir.iterdir() if p.suffix.lower() in VIDEO_EXTENSIONS)
         if not videos:
             logger.warning(f"No video files found in {video_dir}")
             return []
@@ -173,9 +168,7 @@ class PreprocessPipeline:
         return results
 
     @staticmethod
-    def _interpolate_bad_frames(
-        params: np.ndarray, bad_frames: list[int]
-    ) -> np.ndarray:
+    def _interpolate_bad_frames(params: np.ndarray, bad_frames: list[int]) -> np.ndarray:
         """Replace bad frames with interpolated values from neighbors."""
         params = params.copy()
         for idx in bad_frames:
@@ -202,25 +195,13 @@ class PreprocessPipeline:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Amadeus Video -> Training Data Pipeline"
-    )
+    parser = argparse.ArgumentParser(description="Amadeus Video -> Training Data Pipeline")
     parser.add_argument("input", help="Input video file or directory")
-    parser.add_argument(
-        "--output_dir", default="data/preprocessed", help="Output directory"
-    )
-    parser.add_argument(
-        "--mapping", default=None, help="ARKit->Live2D mapping YAML path"
-    )
-    parser.add_argument(
-        "--manifest", default=None, help="Video->identity manifest JSON"
-    )
-    parser.add_argument(
-        "--fps", type=float, default=25.0, help="Target extraction FPS"
-    )
-    parser.add_argument(
-        "--model_dir", default="models/mediapipe", help="MediaPipe model dir"
-    )
+    parser.add_argument("--output_dir", default="data/preprocessed", help="Output directory")
+    parser.add_argument("--mapping", default=None, help="ARKit->Live2D mapping YAML path")
+    parser.add_argument("--manifest", default=None, help="Video->identity manifest JSON")
+    parser.add_argument("--fps", type=float, default=25.0, help="Target extraction FPS")
+    parser.add_argument("--model_dir", default="models/mediapipe", help="MediaPipe model dir")
     args = parser.parse_args()
 
     pipeline = PreprocessPipeline(
@@ -234,9 +215,7 @@ def main():
         if input_path.is_file():
             pipeline.process_video(input_path, args.output_dir)
         elif input_path.is_dir():
-            pipeline.process_directory(
-                input_path, args.output_dir, manifest_path=args.manifest
-            )
+            pipeline.process_directory(input_path, args.output_dir, manifest_path=args.manifest)
         else:
             logger.error(f"Input not found: {input_path}")
     finally:
