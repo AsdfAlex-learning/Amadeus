@@ -1,0 +1,6 @@
+# Native runtime extras that require a platform SDK or build toolchain.
+# Install after requirements-lock.txt:
+#   pip install -r requirements-native.txt
+live2d-py==0.6.1.1
+whisper-cpp-python==0.2.0
+pyopengl==3.1.10

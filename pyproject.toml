@@ -2,21 +2,19 @@
 name = "amadeus"
 version = "0.1.0"
 description = "Amadeus - LPM-inspired real-time interactive AI companion with Live2D avatar"
-requires-python = "==3.11.5"
+requires-python = ">=3.11,<3.12"
 license = { text = "MIT" }
 authors = [
     { name = "Amadeus Team" },
 ]
 dependencies = [
     "PySide6>=6.6.0",
-    "live2d-py>=0.5.0",
     "numpy>=1.24.0",
     "PyAudio>=0.2.13",
-    "opencv-python>=4.8.0",
+    "opencv-contrib-python>=4.10.0",
     "mediapipe>=0.10.0",
-    "whisper-cpp-python>=0.1.0",
     "torch>=2.0.0",
-    "transformers>=4.36.0",
+    "transformers>=4.32.1,<4.33",
     "pyyaml>=6.0",
     "soundfile>=0.12.0",
     "loguru>=0.7.0",
@@ -26,12 +24,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+native = [
+    "live2d-py>=0.5.0",
+    "whisper-cpp-python>=0.1.0",
+]
+preprocess = [
+    "ultralytics>=8.0.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-qt>=4.2.0",
+    "pytest-cov>=7.0.0",
+    "pre-commit>=3.0.0",
     "black>=23.0.0",
-    "ruff>=0.1.0",
-    "basedpyright>=1.0.0",
+    "ruff>=0.17.4",
+    "basedpyright>=1.40.2",
 ]
 
 [build-system]
@@ -68,21 +75,11 @@ target-version = ["py311"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# The runtime contract tests are deliberately RED until the P0 fixes land;
-# see docs/PROJECT_REVIEW_REPORT.md.
 addopts = "-ra"
 
-# .github/workflows/ci.yml runs `basedpyright src/`, but the project had no
-# configuration for it at all. Unconfigured, basedpyright's default
-# ("recommended") mode reports 203 errors and 2384 warnings against this
-# largely-untyped codebase - almost all of them the reportUnknown* family, which
-# describe missing annotations rather than defects. The step was therefore either
-# failing permanently or being ignored.
-#
-# With this configuration the baseline is ~38 errors / ~55 warnings, dominated by
-# reportOptionalMemberAccess on untyped attributes (guards the checker cannot
-# narrow) and by third-party stub inaccuracies. That is a known backlog, so CI
-# runs the step with continue-on-error until it reaches zero.
+# basedpyright is a real CI gate on errors (`--level error`). The remaining
+# warnings are import-resolution / third-party stub noise; reportMissingImports
+# and reportPrivateImportUsage are intentionally warnings, not errors.
 [tool.basedpyright]
 include = ["src"]
 pythonVersion = "3.11"
@@ -93,12 +90,10 @@ reportUnknownVariableType = false
 reportUnknownParameterType = false
 reportUnknownArgumentType = false
 reportUnknownLambdaType = false
-reportUnknownType = false
 reportMissingTypeArgument = false
 reportMissingTypeStubs = false
 reportAny = false
 reportExplicitAny = false
-reportImplicitAny = false
 reportUnusedCallResult = false
 reportUnreachable = false
 # Optional backends (cosyvoice2, ChatTTS, fish-speech, pyttsx3, librosa) are
@@ -109,3 +104,10 @@ reportMissingModuleSource = "warning"
 # torch's bundled stubs omit several re-exports that work at runtime
 # (GradScaler, autocast). That is a stub inaccuracy, not a code defect.
 reportPrivateImportUsage = "warning"
+
+[tool.coverage.run]
+source = ["src"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

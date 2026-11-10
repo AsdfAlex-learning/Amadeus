@@ -1,42 +1,48 @@
 name: CI
 
-# Runs on every branch. It previously triggered only on main, while all
-# development happens on fix/* branches - so the working code was never checked.
 on:
   push:
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements*.txt
 
       - name: Install lint tools
-        run: pip install ruff
+        run: pip install ruff==0.17.4
 
       - name: Ruff lint
-        run: ruff check src/
+        run: ruff check src tests scripts demo.py
 
       - name: Ruff format check
-        run: ruff format --check src/
+        run: ruff format --check src tests scripts demo.py
 
       - name: AST syntax check
         run: |
           python -c "
           import ast
           from pathlib import Path
-          src = Path('src')
+          roots = [Path('src'), Path('tests'), Path('scripts'), Path('demo.py')]
+          files = []
+          for root in roots:
+              files.extend(root.rglob('*.py') if root.is_dir() else [root])
           errors = []
-          for f in sorted(src.rglob('*.py')):
+          for f in sorted(files):
               if f.stat().st_size < 5:
                   continue
               try:
-                  ast.parse(f.read_text())
+                  ast.parse(f.read_text(encoding='utf-8'))
               except SyntaxError as e:
                   errors.append(f'{f}: {e}')
           if errors:
@@ -49,11 +55,12 @@ jobs:
   type-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements*.txt
 
       - name: Install system deps
         run: |
@@ -61,17 +68,10 @@ jobs:
           sudo apt-get install -y portaudio19-dev
 
       - name: Install Python deps
-        run: pip install -r requirements-lock.txt basedpyright
+        run: pip install -r requirements-lock.txt basedpyright==1.40.2
 
-      - name: basedpyright type check (advisory)
-        # Configured by [tool.basedpyright] in pyproject.toml. Unconfigured this
-        # reported 203 errors / 2384 warnings, almost all annotation-coverage noise;
-        # configured, ~38 errors / ~55 warnings remain, dominated by optional-access
-        # on untyped attributes and by third-party stub inaccuracies.
-        # Advisory until that backlog is cleared, so the step reports instead of
-        # failing every build. Remove continue-on-error once it reaches zero.
-        continue-on-error: true
-        run: basedpyright src/
+      - name: basedpyright type check
+        run: basedpyright --level error src/
 
       - name: Import verification
         run: |
@@ -92,11 +92,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements*.txt
 
       - name: Install system deps
         run: |
@@ -104,10 +105,28 @@ jobs:
           sudo apt-get install -y portaudio19-dev
 
       - name: Install Python deps
-        run: pip install -r requirements-lock.txt pytest
+        run: pip install -r requirements-lock.txt pytest==9.1.1 pytest-cov==7.1.0
 
       # No network, no microphone, no camera, no model weights: tests/conftest.py
       # forces the offline encoder stubs, blocks the torchvision weight download
       # and runs Qt headless.
       - name: Run tests
+        run: pytest -q --cov=src --cov-report=term-missing
+
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install Python deps
+        run: pip install -r requirements-lock.txt pytest==9.1.1
+
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: pytest -q
