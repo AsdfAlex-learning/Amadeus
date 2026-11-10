@@ -63,12 +63,13 @@ def _open_stream(url: str, headers: dict, body: bytes, timeout: float):
 
 
 def _close_quietly(conn) -> None:
+    # Do not call conn.close(): HTTPConnection.close() closes the response,
+    # which deadlocks against the reader still blocked in readline (F-1).
+    sock = getattr(conn, "sock", None)
+    if sock is None:
+        return
     try:
-        conn.sock.close()
-    except Exception:
-        pass
-    try:
-        conn.close()
+        sock.close()
     except Exception:
         pass
 
