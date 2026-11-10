@@ -178,6 +178,8 @@ class FaceLandmarkerExtractor:
         # a non-contiguous slice which mediapipe rejects.
         frame_rgb = np.ascontiguousarray(frame[:, :, ::-1], dtype=np.uint8)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+        if self._landmarker is None:
+            return default
         result = self._landmarker.detect(mp_image)
         if not result.face_blendshapes:
             return default
@@ -201,6 +203,8 @@ class FaceLandmarkerExtractor:
         import cv2
 
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if self._legacy_face_mesh is None:
+            return default
         mp_result = self._legacy_face_mesh.process(frame_rgb)
         if not mp_result.multi_face_landmarks:
             return default

@@ -103,7 +103,28 @@ motion:
   silence_enabled: true
   silence_idle_seconds: 0.5      # quiet time before idle motion starts
   silence_interval_seconds: 1.0  # how often an idle step runs
+  silence_prompt:
+    enabled: true
+    update_interval_ms: 1000
+    min_interval_seconds: 2.0
+    context_chars: 120
+    micro_behaviors:
+      - "slightly tilt the head"
+      - "slowly blink"
+      - "shift gaze toward the user"
+      - "take a small breath"
+      - "relax the shoulders"
   max_speech_lag_seconds: 1.5    # how far Speak state may fall behind playback
+  baseline:
+    enabled: true
+    fps: 50.0
+    mouth_open_gain: 3.0
+    blink_interval_seconds: [3.0, 6.0]
+    blink_duration_seconds: 0.12
+    breath_cycles_per_minute: 14.0
+    head_motion_amplitude: 0.15
+    expression_smoothing: 0.2
+    seed: null
 
 perception:
   camera_device: null
@@ -153,6 +174,10 @@ preprocess:
     min_tracking_confidence: 0.5
   arkit_mapping:
     config_path: "src/motion/preprocess/mappings/default.yaml"
+  body_skeleton:
+    enabled: false
+    model_path: "models/yolov8n-pose.pt"
+    confidence: 0.25
     num_live2d_params: 45
   pipeline:
     output_format: "npz"  # npz or hdf5

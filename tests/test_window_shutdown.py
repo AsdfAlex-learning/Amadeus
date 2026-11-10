@@ -40,9 +40,7 @@ def window(config: dict, qapp, monkeypatch):
 
 def _install_slow_generation(window, monkeypatch) -> threading.Thread:
     """Start a generation that yields slowly and can be cancelled between chunks."""
-    monkeypatch.setattr(
-        type(window.tts_engine), "is_loaded", property(lambda self: False)
-    )
+    monkeypatch.setattr(type(window.tts_engine), "is_loaded", property(lambda self: False))
 
     def slow_generate(_messages, **_kw):
         for _ in range(200):

@@ -16,7 +16,6 @@ from __future__ import annotations
 import time
 
 import numpy as np
-import pytest
 
 
 class _RecordingEngine:
@@ -29,9 +28,7 @@ class _RecordingEngine:
         self.modes: list[str] = []
 
         def _infer(user_chunk, tts_chunk, _visual, prompt=None):
-            self.steps.append(
-                (np.array(user_chunk), np.array(tts_chunk), prompt)
-            )
+            self.steps.append((np.array(user_chunk), np.array(tts_chunk), prompt))
             return np.full((5, 45), 0.5, dtype=np.float32)
 
         engine = DiffusionMotionInference(config)

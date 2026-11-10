@@ -18,6 +18,7 @@ def download_hubert():
     t0 = time.time()
     try:
         from transformers import HubertModel
+
         HubertModel.from_pretrained("facebook/hubert-base-ls960")
         print(f"      ✓ Hubert cached ({time.time() - t0:.1f}s)")
     except Exception as e:
@@ -31,6 +32,7 @@ def download_mobilenet():
     t0 = time.time()
     try:
         from torchvision.models import mobilenet_v3_small
+
         mobilenet_v3_small(weights="DEFAULT")
         print(f"      ✓ MobileNetV3 cached ({time.time() - t0:.1f}s)")
     except Exception as e:
@@ -44,6 +46,7 @@ def download_bert():
     t0 = time.time()
     try:
         from transformers import BertModel, BertTokenizer
+
         BertTokenizer.from_pretrained("google/bert_uncased_L-2_H-128_A-2")
         BertModel.from_pretrained("google/bert_uncased_L-2_H-128_A-2")
         print(f"      ✓ BERT-tiny cached ({time.time() - t0:.1f}s)")
@@ -56,6 +59,7 @@ def download_bert():
 def verify_cache():
     print("\n[verify] Checking cached files...")
     import os
+
     cache_dirs = [
         os.path.expanduser("~/.cache/huggingface/hub"),
         os.path.expanduser("~/.cache/torch/hub/checkpoints"),

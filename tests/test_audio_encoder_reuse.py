@@ -26,8 +26,9 @@ def _engine_with_real_model(config: dict) -> tuple[DiffusionMotionInference, lis
     if model is None:
         from src.motion.model import FullDuplexDiT
 
-        model = FullDuplexDiT(num_params=45, hidden_dim=32, num_layers=1,
-                             use_gradient_checkpointing=False)
+        model = FullDuplexDiT(
+            num_params=45, hidden_dim=32, num_layers=1, use_gradient_checkpointing=False
+        )
     model.eval()
     engine._model = model
     engine._loaded = True
@@ -87,9 +88,7 @@ def test_listen_features_can_be_supplied_by_the_caller(config: dict) -> None:
 
     batch, frames = 1, 49
     with torch.no_grad():
-        listen_feat = model.audio_proj(
-            model.audio_encoder(torch.zeros(batch, CHUNK))
-        )
+        listen_feat = model.audio_proj(model.audio_encoder(torch.zeros(batch, CHUNK)))
         calls.clear()
         model(
             torch.zeros(batch, CHUNK),

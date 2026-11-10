@@ -206,9 +206,7 @@ def test_training_resumes_from_a_full_snapshot(
     train(data_dir=tiny_preprocessed_dataset, output_dir=first_run, **_TINY_TRAIN_KWARGS)
 
     checkpoint = first_run / "full_duplex_dit.pt"
-    assert checkpoint.exists(), (
-        "the first run did not produce a full snapshot; cannot test resume"
-    )
+    assert checkpoint.exists(), "the first run did not produce a full snapshot; cannot test resume"
 
     # The behaviour under test: resuming must not raise.
     train(
@@ -222,9 +220,7 @@ def test_training_resumes_from_a_full_snapshot(
 # ── C-8: persona performance parameters must reach the output ────────────────
 
 
-def test_persona_performance_params_change_emitted_motion(
-    config: dict, project_root: Path
-) -> None:
+def test_persona_performance_params_change_emitted_motion(config: dict, project_root: Path) -> None:
     """``config['performance']`` must actually affect the emitted parameters.
 
     gesture_scale / expressiveness / react_speed / ... are documented as

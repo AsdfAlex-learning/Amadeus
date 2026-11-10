@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from loguru import logger
 
+from src.motion.baseline import Phase0Baseline
 from src.motion.model import FullDuplexDiT
 from src.runtime.concurrency import BoundedDropOldest, FrameBuffer, Mailbox
 
@@ -45,6 +46,13 @@ class DiffusionMotionInference:
         # instantiated it, so gesture_scale / expressiveness / react_speed /
         # mouth_open_max / head_motion_range / idle_energy had no effect at all.
         self._performance = self._build_performance_engine(config)
+        baseline_cfg = motion_cfg.get("baseline", {}) or {}
+        self._baseline = (
+            Phase0Baseline(config, sample_rate=self.sample_rate)
+            if baseline_cfg.get("enabled", True)
+            else None
+        )
+        self._use_baseline = False
 
         # Stage 1.4: inference gets an owner thread so it can never run on the
         # capture drain worker, which must keep running VAD.
@@ -142,6 +150,23 @@ class DiffusionMotionInference:
     def load_model(self) -> bool:
         try:
             self._device = self._detect_device()
+            checkpoint_path = self.model_path / "full_duplex_dit.pt"
+            if (
+                not checkpoint_path.exists()
+                and self._baseline is not None
+                and self._baseline.enabled
+            ):
+                self._use_baseline = True
+                self._loaded = True
+                if self._current_lora_id is not None:
+                    logger.warning(
+                        "LoRA adapter ignored: no neural checkpoint; using the Phase 0 baseline"
+                    )
+                logger.warning(
+                    f"No checkpoint at {checkpoint_path}; using the Phase 0 non-neural baseline"
+                )
+                return True
+
             self._model = FullDuplexDiT(
                 num_params=self.num_params,
                 hidden_dim=320,
@@ -149,7 +174,6 @@ class DiffusionMotionInference:
                 identity_vocab_size=self.identity_vocab_size,
                 use_gradient_checkpointing=False,
             )
-            checkpoint_path = self.model_path / "full_duplex_dit.pt"
             if checkpoint_path.exists():
                 # Support both the new full snapshot format (L4) and the legacy
                 # raw state_dict. The full snapshot stores weights under "model".
@@ -273,7 +297,7 @@ class DiffusionMotionInference:
             self._load_lora_for(char_id)
 
     def process_user_audio(self, audio: np.ndarray):
-        if not self._loaded or self._model is None:
+        if not self._loaded or (self._model is None and not self._use_baseline):
             return
         self._last_activity_at = time.monotonic()
         if self._motion_worker is not None:
@@ -292,7 +316,7 @@ class DiffusionMotionInference:
         it explicitly when the backend's true rate differs from
         ``config.tts.sample_rate``; otherwise the duration is silently wrong.
         """
-        if not self._loaded or self._model is None:
+        if not self._loaded or (self._model is None and not self._use_baseline):
             return
         self._last_activity_at = time.monotonic()
         source_rate = int(sample_rate) if sample_rate is not None else self._tts_sample_rate
@@ -488,6 +512,8 @@ class DiffusionMotionInference:
         return self._speech_inferred + chunk_samples <= gate
 
     def _pop_speech_chunk(self, chunk_samples: int) -> np.ndarray:
+        if self._speech is None:
+            return np.zeros(chunk_samples, dtype=np.float32)
         _stream_id, audio = self._speech
         start = self._speech_inferred
         end = start + chunk_samples
@@ -613,7 +639,18 @@ class DiffusionMotionInference:
         visual_frames: np.ndarray,
         prompt: str | None = None,
     ) -> np.ndarray | None:
+        if self._use_baseline and self._baseline is not None:
+            if np.any(tts_audio):
+                mode = "speak"
+            elif np.any(user_audio):
+                mode = "listen"
+            else:
+                mode = "silence"
+            frames = self._baseline.num_frames_for(max(len(user_audio), len(tts_audio)))
+            return self._baseline.generate(user_audio, tts_audio, mode=mode, num_frames=frames)
         if self._model is None:
+            return None
+        if self._alphas_cumprod is None:
             return None
         if visual_frames.ndim < 4:
             if visual_frames.ndim == 3:
@@ -622,9 +659,18 @@ class DiffusionMotionInference:
                 visual_frames = np.zeros((5, 3, 224, 224), dtype=np.float32)
 
         with torch.no_grad():
-            user_wav = torch.from_numpy(user_audio).unsqueeze(0).to(self._device)
-            tts_wav = torch.from_numpy(tts_audio).unsqueeze(0).to(self._device)
-            vis = torch.from_numpy(visual_frames).unsqueeze(0).float().to(self._device)
+            model_dtype = next(self._model.parameters()).dtype
+            user_wav = (
+                torch.from_numpy(user_audio).unsqueeze(0).to(device=self._device, dtype=model_dtype)
+            )
+            tts_wav = (
+                torch.from_numpy(tts_audio).unsqueeze(0).to(device=self._device, dtype=model_dtype)
+            )
+            vis = (
+                torch.from_numpy(visual_frames)
+                .unsqueeze(0)
+                .to(device=self._device, dtype=model_dtype)
+            )
             id_tensor = torch.tensor([self._character_id], device=self._device)
             active_prompt = prompt if prompt is not None else self._current_prompt
             prompts = [active_prompt] if active_prompt else [""]
@@ -636,7 +682,7 @@ class DiffusionMotionInference:
             # pass per DDIM step.
             listen_feat = self._model.audio_proj(self._model.audio_encoder(user_wav))
             T = listen_feat.shape[1]
-            x = torch.randn(B, T, self.num_params, device=self._device)
+            x = torch.randn(B, T, self.num_params, device=self._device, dtype=model_dtype)
 
             # X-prediction DDIM sampling.
             # Model directly predicts x_0 ∈ [0, 1]. Step formula:
@@ -651,7 +697,9 @@ class DiffusionMotionInference:
                 t = timesteps[i]
                 t_next = timesteps[i + 1]
                 t_tensor = t.unsqueeze(0).expand(B)
-                alpha_t = torch.tensor(self._alphas_cumprod[t], device=self._device)
+                alpha_t = torch.tensor(
+                    self._alphas_cumprod[t], device=self._device, dtype=model_dtype
+                )
                 pred_x0 = self._model(
                     user_wav,
                     tts_wav,
@@ -667,17 +715,19 @@ class DiffusionMotionInference:
                 pred_eps = (x - sqrt_alpha_t * pred_x0) / sqrt_one_minus_alpha_t
 
                 alpha_prev = (
-                    torch.tensor(self._alphas_cumprod[t_next], device=self._device)
+                    torch.tensor(
+                        self._alphas_cumprod[t_next], device=self._device, dtype=model_dtype
+                    )
                     if t_next > 0
-                    else torch.tensor(1.0, device=self._device)
+                    else torch.tensor(1.0, device=self._device, dtype=model_dtype)
                 )
                 # η=0 → deterministic DDIM (no stochastic noise injection)
-                sigma_t = torch.tensor(0.0, device=self._device)
+                sigma_t = torch.tensor(0.0, device=self._device, dtype=model_dtype)
                 dir_xt = torch.sqrt((1.0 - alpha_prev - sigma_t**2).clamp(min=0.0)) * pred_eps
                 noise = torch.randn_like(x) if t_next > 0 else torch.zeros_like(x)
                 x = torch.sqrt(alpha_prev) * pred_x0 + dir_xt + sigma_t * noise
 
-            return x[0].cpu().numpy()
+            return x[0].float().cpu().numpy()
 
     def _emit_params(self, params_seq: np.ndarray):
         num_frames = params_seq.shape[0]
@@ -727,11 +777,14 @@ class DiffusionMotionInference:
         self._visual_buffer.clear()
         if self._performance is not None:
             self._performance.reset()
+        if self._baseline is not None:
+            self._baseline.reset()
 
     def cleanup(self):
         self.stop_worker()
         self._model = None
         self._loaded = False
+        self._use_baseline = False
         self._param_callbacks.clear()
         self._audio_buffer.clear()
         self._speech = None
@@ -740,6 +793,8 @@ class DiffusionMotionInference:
         self._visual_buffer.clear()
         if self._performance is not None:
             self._performance.reset()
+        if self._baseline is not None:
+            self._baseline.reset()
 
     @property
     def is_loaded(self) -> bool:

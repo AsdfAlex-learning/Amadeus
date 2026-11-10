@@ -110,9 +110,7 @@ def test_speech_is_buffered_while_a_transcription_is_pending(config: dict) -> No
     finally:
         pipeline.cleanup()
 
-    assert buffered, (
-        "speech that arrived while a transcription was pending was discarded"
-    )
+    assert buffered, "speech that arrived while a transcription was pending was discarded"
 
 
 def test_back_to_back_utterances_are_not_overwritten(config: dict) -> None:

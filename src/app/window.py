@@ -1,7 +1,8 @@
 import threading
+import time
 
 from loguru import logger
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QLabel,
@@ -17,6 +18,7 @@ from src.dialogue.context import ConversationContext
 from src.dialogue.model import DialogueModel, DialogueUnavailableError
 from src.dialogue.persona import Persona
 from src.motion.inference import DiffusionMotionInference
+from src.motion.silence_prompt import SilenceContext, SilencePromptGenerator
 from src.perception.camera import CameraPerception
 from src.runtime.playback import PlaybackWorker
 from src.tts.engine import TTSEngine
@@ -47,6 +49,9 @@ class AmadeusWindow(QMainWindow):
         self.context = ConversationContext(
             max_tokens=int(config["dialogue"].get("max_context_tokens", 4096))
         )
+        self.silence_prompt_generator = SilencePromptGenerator(config)
+        self._last_interaction_at = time.monotonic()
+        self._silence_prompt_timer: QTimer | None = None
         self._bridge = _PipelineBridge()
         self._generating = False
         # Each generation gets its own id. One shared cancel Event is not enough:
@@ -81,6 +86,7 @@ class AmadeusWindow(QMainWindow):
         self._load_motion_model()
         self._load_tts()
         self._connect_camera()
+        self._start_silence_prompt_timer()
         logger.debug("Main window initialized")
 
     def _setup_window(self):
@@ -171,6 +177,37 @@ class AmadeusWindow(QMainWindow):
         self.camera.on_frame(self.motion_model.process_visual_frame)
         logger.info("Camera connected — visual frames fed to motion model")
 
+    def _start_silence_prompt_timer(self):
+        if not self.silence_prompt_generator.enabled:
+            return
+        settings = (self.config.get("motion", {}) or {}).get("silence_prompt", {}) or {}
+        interval_ms = max(100, int(settings.get("update_interval_ms", 1000)))
+        timer = QTimer(self)
+        timer.setInterval(interval_ms)
+        timer.timeout.connect(self._update_silence_prompt)
+        timer.start()
+        self._silence_prompt_timer = timer
+
+    def _update_silence_prompt(self):
+        if self._shutting_down:
+            return
+        messages = self.context.get_messages()
+        last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), None)
+        last_assistant = next(
+            (m["content"] for m in reversed(messages) if m["role"] == "assistant"), None
+        )
+        prompt = self.silence_prompt_generator.generate(
+            SilenceContext(
+                seconds_since_interaction=time.monotonic() - self._last_interaction_at,
+                last_user_text=last_user,
+                last_assistant_text=last_assistant,
+                perception=self.camera.latest_perception(),
+                character_emotion=getattr(self.dialogue_model, "last_emotion", None),
+            )
+        )
+        if prompt:
+            self.motion_model.set_silence_prompt(prompt)
+
     def _on_text(self, text: str):
         self._bridge.text_received.emit(text)
 
@@ -180,6 +217,7 @@ class AmadeusWindow(QMainWindow):
     def _handle_text(self, text: str):
         self.conversation_display.append(f"<span style='color:#4a90d9'><b>你:</b> {text}</span>")
         self.context.add_user_message(text)
+        self._last_interaction_at = time.monotonic()
         self.motion_model.set_text_prompt(text)
         self._start_generation()
 
@@ -344,6 +382,9 @@ class AmadeusWindow(QMainWindow):
         # resources. The generation thread must be joined BEFORE playback is torn
         # down, because it is the thread that submits audio to it.
         self._shutting_down = True
+        if self._silence_prompt_timer is not None:
+            self._silence_prompt_timer.stop()
+            self._silence_prompt_timer = None
         self._cancel_generation()
         self._join_generation_thread()
         # T7 is stopped after the generation thread is joined (T5 is what submits

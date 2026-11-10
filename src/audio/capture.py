@@ -187,7 +187,7 @@ class MicrophoneCapture:
         devices = []
         for i in range(self._audio.get_device_count()):
             info = self._audio.get_device_info_by_index(i)
-            if info.get("maxInputChannels", 0) > 0:
+            if int(info.get("maxInputChannels", 0)) > 0:
                 devices.append(
                     {
                         "index": i,

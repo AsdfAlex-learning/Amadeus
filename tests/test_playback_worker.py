@@ -13,7 +13,6 @@ These tests use an injected stream, so no audio device is required.
 
 from __future__ import annotations
 
-import threading
 import time
 
 import numpy as np
@@ -127,9 +126,7 @@ def test_stop_and_flush_interrupts_an_in_progress_utterance() -> None:
 def test_interruption_writes_a_decaying_tail_rather_than_cutting_hard() -> None:
     """A hard cut clicks; the tail must fade toward silence."""
     factory = _Factory(write_delay=0.05)
-    worker = PlaybackWorker(
-        RATE, stream_factory=factory, chunk_seconds=0.2, fade_ms=80.0
-    )
+    worker = PlaybackWorker(RATE, stream_factory=factory, chunk_seconds=0.2, fade_ms=80.0)
     worker.start()
     try:
         worker.play(4, np.ones(RATE * 5, dtype=np.float32))
@@ -141,9 +138,7 @@ def test_interruption_writes_a_decaying_tail_rather_than_cutting_hard() -> None:
 
     stream = factory.streams[0]
     fade = stream.writes[-1]
-    assert fade.size == int(RATE * 0.08), (
-        f"expected an 80 ms fade tail, got {fade.size} samples"
-    )
+    assert fade.size == int(RATE * 0.08), f"expected an 80 ms fade tail, got {fade.size} samples"
     assert fade[0] > fade[-1], "the fade tail does not decay"
     assert fade[-1] == pytest.approx(0.0, abs=1e-6)
 

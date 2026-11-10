@@ -292,7 +292,7 @@ def train(
                         pred = model(audio, tts_audio, visual, prompts, identity, t, noisy)
                         val_loss += criterion(pred, motion).item()
             val_loss /= max(len(val_loader), 1)
-            if backup is not None:
+            if backup is not None and ema is not None:
                 ema.restore(model, backup)
             model.train()
 
@@ -372,7 +372,7 @@ def train(
                 "ema_decay": ema_decay,
             },
         )
-        if backup is not None:
+        if backup is not None and ema is not None:
             ema.restore(model, backup)
         logger.info(f"Model saved to {checkpoint_path}")
     return model
@@ -383,7 +383,7 @@ def _save_full_checkpoint(
     *,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler._LRScheduler,
+    scheduler: Any,
     scaler: torch.amp.GradScaler | None,
     ema: EMAModel | None = None,
     epoch: int,

@@ -151,9 +151,7 @@ def test_a_truncated_turn_is_kept_in_context(window, monkeypatch) -> None:
     window._cancel_generation(window._generation_id)
     assert _wait_until(lambda: not window._generation_thread.is_alive())
 
-    assistant_turns = [
-        m for m in window.context.get_messages() if m["role"] == "assistant"
-    ]
+    assistant_turns = [m for m in window.context.get_messages() if m["role"] == "assistant"]
     assert assistant_turns, "the truncated assistant turn was discarded from context"
 
 

@@ -97,13 +97,13 @@ class MotionDataset(Dataset):
     def __len__(self) -> int:
         return len(self._samples)
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor | str]:
         sample = self._samples[idx]
         if sample["type"] == "npz":
             return self._get_npz_item(sample)
         return self._get_legacy_item(sample)
 
-    def _get_npz_item(self, sample: dict) -> dict[str, torch.Tensor]:
+    def _get_npz_item(self, sample: dict) -> dict[str, torch.Tensor | str]:
         data = np.load(str(sample["npz_path"]), allow_pickle=False)
         live2d_params = data["live2d_params"]  # (T, 45)
         head_angles = data.get(
@@ -165,7 +165,7 @@ class MotionDataset(Dataset):
             "head_angles": torch.from_numpy(head_chunk).float(),
         }
 
-    def _get_legacy_item(self, sample: dict) -> dict[str, torch.Tensor]:
+    def _get_legacy_item(self, sample: dict) -> dict[str, torch.Tensor | str]:
         audio = self._load_audio(sample["audio_path"])
         motion = np.load(str(sample["motion_path"])).astype(np.float32)
         # L5 fix: legacy .npy files store motion as (samples, 45) aligned

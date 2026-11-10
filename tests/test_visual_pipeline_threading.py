@@ -23,7 +23,6 @@ import pytest
 
 from src.runtime.concurrency import FrameBuffer
 
-
 # ── FrameBuffer ──────────────────────────────────────────────────────────────
 
 
@@ -50,8 +49,8 @@ def test_buffer_is_bounded_and_counts_drops() -> None:
 def test_frames_are_evicted_by_age() -> None:
     """A stalled camera must not leave stale frames paired with current audio."""
     buf = FrameBuffer(capacity=10, max_age_s=1.0)
-    buf.put(np.zeros(1, dtype=np.float32), timestamp=100.0)   # becomes 1.5 s old
-    buf.put(np.ones(1, dtype=np.float32), timestamp=100.8)    # becomes 0.7 s old
+    buf.put(np.zeros(1, dtype=np.float32), timestamp=100.0)  # becomes 1.5 s old
+    buf.put(np.ones(1, dtype=np.float32), timestamp=100.8)  # becomes 0.7 s old
 
     # At now=101.5 the first frame has expired and the second has not.
     fresh = buf.snapshot(5, now=101.5)
@@ -129,9 +128,7 @@ def test_prepare_visual_frames_uses_the_newest_frames(config: dict) -> None:
     The old sampler spread its picks across the entire buffer, so with a 10-frame
     buffer the oldest pick was ~2 s stale.
     """
-    frames = [
-        np.full((224, 224, 3), i / 10.0, dtype=np.float32) for i in range(10)
-    ]
+    frames = [np.full((224, 224, 3), i / 10.0, dtype=np.float32) for i in range(10)]
     visual = _captured_visual(config, frames)
 
     assert visual.shape == (5, 3, 224, 224)

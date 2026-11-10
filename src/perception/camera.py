@@ -27,6 +27,8 @@ class CameraPerception:
         self._last_published_at: float | None = None
         self._callbacks: list[Callable[[np.ndarray], None]] = []
         self._perception_callbacks: list[Callable[[dict[str, Any]], None]] = []
+        self._perception_lock = threading.Lock()
+        self._latest_perception: dict[str, Any] | None = None
 
     def start(self):
         if self._running:
@@ -60,6 +62,8 @@ class CameraPerception:
         self.stop()
         self._callbacks.clear()
         self._perception_callbacks.clear()
+        with self._perception_lock:
+            self._latest_perception = None
         if self._face_mesh is not None:
             try:
                 self._face_mesh.close()
@@ -72,6 +76,11 @@ class CameraPerception:
 
     def on_perception(self, callback: Callable[[dict[str, Any]], None]):
         self._perception_callbacks.append(callback)
+
+    def latest_perception(self) -> dict[str, Any] | None:
+        """Return the last FaceMesh snapshot, or None before the first frame."""
+        with self._perception_lock:
+            return dict(self._latest_perception) if self._latest_perception is not None else None
 
     def _load_mediapipe(self):
         try:
@@ -125,8 +134,10 @@ class CameraPerception:
                 except Exception as e:
                     logger.error(f"Frame callback error: {e}")
 
-            if self._perception_callbacks and self._face_mesh is not None:
+            if self._face_mesh is not None:
                 perception = self._process_face_mesh(frame_rgb)
+                with self._perception_lock:
+                    self._latest_perception = dict(perception)
                 for cb in self._perception_callbacks:
                     try:
                         cb(perception)

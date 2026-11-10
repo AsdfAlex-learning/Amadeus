@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
@@ -37,8 +39,10 @@ class HubertEncoder(nn.Module):
 
     def warmup(self, device: torch.device):
         if self._loaded and self.hubert is not None:
-            self.hubert = self.hubert.to(device)
-            dummy = torch.randn(1, 16000, device=device)
+            self.hubert = cast(Any, self.hubert).to(device)
+            parameter = next(self.hubert.parameters(), None)
+            dtype = parameter.dtype if parameter is not None else torch.float32
+            dummy = torch.randn(1, 16000, device=device, dtype=dtype)
             with torch.no_grad():
                 self.forward(dummy)
 
@@ -89,7 +93,9 @@ class VisualEncoder(nn.Module):
     def warmup(self, device: torch.device):
         if self._loaded and self.backbone is not None:
             self.backbone = self.backbone.to(device)
-            dummy = torch.randn(1, 3, 224, 224, device=device)
+            parameter = next(self.backbone.parameters(), None)
+            dtype = parameter.dtype if parameter is not None else torch.float32
+            dummy = torch.randn(1, 3, 224, 224, device=device, dtype=dtype)
             with torch.no_grad():
                 self.forward(dummy.unsqueeze(1))
 
@@ -150,7 +156,7 @@ class TextEncoder(nn.Module):
 
     def warmup(self, device: torch.device):
         if self._loaded and self.bert is not None:
-            self.bert = self.bert.to(device)
+            self.bert = cast(Any, self.bert).to(device)
 
     def to_half(self):
         if self._loaded and self.bert is not None:
@@ -279,7 +285,10 @@ class DiTBlock(nn.Module):
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.use_checkpoint and self.training:
-            return checkpoint.checkpoint(self._forward, x, c, cross_kv, mask, use_reentrant=False)
+            return cast(
+                torch.Tensor,
+                checkpoint.checkpoint(self._forward, x, c, cross_kv, mask, use_reentrant=False),
+            )
         return self._forward(x, c, cross_kv, mask)
 
 
@@ -453,6 +462,7 @@ class FullDuplexDiT(nn.Module):
             w = ((t_out - t_in[idx_prev]) / (t_in[idx] - t_in[idx_prev] + 1e-8)).unsqueeze(-1)
             return ((1 - w) * xf[:, idx_prev, :] + w * xf[:, idx, :]).to(out_dtype)
 
+        assert listen_feat is not None
         listen_feat = _resample_time(listen_feat, T)
         speak_feat = _resample_time(speak_feat, T)
         visual_feat = _resample_time(visual_feat, T)

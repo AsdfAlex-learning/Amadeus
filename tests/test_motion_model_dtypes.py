@@ -43,8 +43,7 @@ def test_to_half_converts_every_parameter() -> None:
         if param.dtype != torch.float16
     ]
     assert not unconverted, (
-        f"to_half() left {len(unconverted)} parameter(s) unconverted: "
-        f"{unconverted[:5]}"
+        f"to_half() left {len(unconverted)} parameter(s) unconverted: {unconverted[:5]}"
     )
 
 
@@ -69,3 +68,29 @@ def test_half_model_forward_is_dtype_consistent() -> None:
         )
     assert out.dtype == torch.float16, f"expected half output, got {out.dtype}"
     assert out.shape == (batch, frames, 45)
+
+
+def test_warmup_uses_the_encoder_dtype():
+    from src.motion.model import HubertEncoder
+
+    class _TinyHubert(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1, dtype=torch.float16))
+            self.seen: list[torch.dtype] = []
+
+        def forward(self, waveform, output_hidden_states=True):
+            self.seen.append(waveform.dtype)
+            hidden = torch.zeros(1, 1, 768, dtype=waveform.dtype)
+            return type("_Out", (), {"last_hidden_state": hidden})()
+
+    encoder = object.__new__(HubertEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder._loaded = True
+    encoder._freeze = True
+    encoder.hubert = _TinyHubert()
+
+    encoder.to_half()
+    encoder.warmup(torch.device("cpu"))
+
+    assert encoder.hubert.seen == [torch.float16]

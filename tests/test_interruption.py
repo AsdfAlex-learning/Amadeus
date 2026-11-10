@@ -62,9 +62,7 @@ def test_speech_onset_fires_once_per_utterance(config: dict) -> None:
         loud = np.full(1024, 0.5, dtype=np.float32)
         for _ in range(5):
             pipeline._on_audio_chunk(loud)
-        assert len(onsets) == 1, (
-            f"onset fired {len(onsets)} times for one continuous utterance"
-        )
+        assert len(onsets) == 1, f"onset fired {len(onsets)} times for one continuous utterance"
 
         # End the utterance, then speak again.
         loud_until_silence = [loud] * int(
@@ -135,9 +133,7 @@ def test_interruption_then_transcript_produces_a_reply(window, monkeypatch) -> N
     assert window._generation_id > before, "the interrupting utterance started no generation"
 
     assert _wait_until(
-        lambda: any(
-            m["role"] == "assistant" for m in window.context.get_messages()
-        )
+        lambda: any(m["role"] == "assistant" for m in window.context.get_messages())
     ), "the interrupting utterance never produced a reply"
 
 

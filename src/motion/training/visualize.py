@@ -175,7 +175,7 @@ def plot_motion_comparison(
     )
     fig.suptitle(title, fontsize=11)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
     print(f"  wrote {out_path}")

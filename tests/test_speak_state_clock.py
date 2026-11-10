@@ -172,7 +172,7 @@ def test_a_new_utterance_supersedes_a_pending_one_not_the_active_one(config: dic
     engine.attach_playback(_FakePlayback(played=0), playback_rate=RATE)
     engine.SPEECH_LOOKAHEAD_SECONDS = 1.0
 
-    engine.process_tts_audio(_ramp(4.0))          # stream 1 promoted
+    engine.process_tts_audio(_ramp(4.0))  # stream 1 promoted
     assert engine.speech_active
     engine.process_tts_audio(np.zeros(RATE, dtype=np.float32))  # stream 2 pending
 

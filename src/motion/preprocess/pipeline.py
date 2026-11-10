@@ -16,6 +16,7 @@ import numpy as np
 from loguru import logger
 
 from src.motion.preprocess.arkit_to_live2d import NUM_LIVE2D_PARAMS, ARKitToLive2DMapper
+from src.motion.preprocess.body_skeleton import BODY_PARAM_KEYS, BodySkeletonExtractor
 from src.motion.preprocess.face_landmarker import FaceLandmarkerExtractor
 from src.motion.preprocess.video_reader import VideoReader
 
@@ -30,11 +31,13 @@ class PreprocessPipeline:
         mapping_path: str | Path | None = None,
         model_dir: str | Path = "models/mediapipe",
         target_fps: float = 25.0,
+        body_extractor: BodySkeletonExtractor | None = None,
     ):
         self.target_fps = target_fps
         self.video_reader: VideoReader | None = None
         self.landmarker = FaceLandmarkerExtractor(model_dir=model_dir)
         self.mapper = ARKitToLive2DMapper(mapping_path=mapping_path)
+        self.body_extractor = body_extractor
 
     def process_video(
         self, video_path: str | Path, output_dir: str | Path, identity_id: int = 0
@@ -89,23 +92,32 @@ class PreprocessPipeline:
         if bad_frames:
             live2d_params = self._interpolate_bad_frames(live2d_params, bad_frames)
 
+        body_params = None
+        body_detected = 0
+        if self.body_extractor is not None:
+            body_data = self.body_extractor.process_video(video_path, fps=self.target_fps)
+            body_params = self._align_body_params(body_data.get("body_params"), T)
+            body_detected = int(body_data.get("detected_frames", 0))
+
         # 4. Get video metadata
         meta = reader.get_metadata()
         duration_sec = meta.get("duration_sec", T / self.target_fps)
 
         # 5. Save .npz
         npz_path = output_dir / f"{video_path.stem}.npz"
-        np.savez(
-            npz_path,
-            live2d_params=live2d_params.astype(np.float32),
-            blendshapes=blendshapes.astype(np.float32),
-            head_angles=head_angles.astype(np.float32),
-            bad_frames=np.array(bad_frames, dtype=np.int64),
-            fps=np.float32(self.target_fps),
-            duration_sec=np.float32(duration_sec),
-            identity_id=np.int64(identity_id),
-            source_video=str(video_path),
-        )
+        arrays = {
+            "live2d_params": live2d_params.astype(np.float32),
+            "blendshapes": blendshapes.astype(np.float32),
+            "head_angles": head_angles.astype(np.float32),
+            "bad_frames": np.array(bad_frames, dtype=np.int64),
+            "fps": np.float32(self.target_fps),
+            "duration_sec": np.float32(duration_sec),
+            "identity_id": np.int64(identity_id),
+            "source_video": str(video_path),
+        }
+        if body_params is not None:
+            arrays["body_params"] = body_params.astype(np.float32)
+        np.savez(npz_path, **arrays)
         logger.info(f"Saved: {npz_path} ({T} frames, {len(bad_frames)} bad)")
 
         # 6. Save _meta.json
@@ -119,6 +131,8 @@ class PreprocessPipeline:
             "duration_sec": duration_sec,
             "bad_frame_count": len(bad_frames),
             "live2d_param_count": NUM_LIVE2D_PARAMS,
+            "body_param_count": len(BODY_PARAM_KEYS) if body_params is not None else 0,
+            "body_detected_frames": body_detected,
             "created_at": datetime.now().isoformat(),
             "amadeus_version": "0.1.0",
         }
@@ -192,6 +206,21 @@ class PreprocessPipeline:
 
     def cleanup(self):
         self.landmarker.cleanup()
+        if self.body_extractor is not None:
+            self.body_extractor.cleanup()
+
+    @staticmethod
+    def _align_body_params(body_params: np.ndarray | None, num_frames: int) -> np.ndarray:
+        """Pad or truncate body params to match the face-parameter count."""
+        if body_params is None or len(body_params) == 0:
+            return np.zeros((num_frames, len(BODY_PARAM_KEYS)), dtype=np.float32)
+        arr = np.asarray(body_params, dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[1] != len(BODY_PARAM_KEYS):
+            raise ValueError(f"Expected (T, {len(BODY_PARAM_KEYS)}) body params, got {arr.shape}")
+        if len(arr) >= num_frames:
+            return arr[:num_frames]
+        pad = np.repeat(arr[-1:], num_frames - len(arr), axis=0)
+        return np.concatenate([arr, pad], axis=0)
 
 
 def main():
@@ -202,12 +231,19 @@ def main():
     parser.add_argument("--manifest", default=None, help="Video->identity manifest JSON")
     parser.add_argument("--fps", type=float, default=25.0, help="Target extraction FPS")
     parser.add_argument("--model_dir", default="models/mediapipe", help="MediaPipe model dir")
+    parser.add_argument(
+        "--body_model",
+        default=None,
+        help="YOLOv8-pose weights for body params (optional; enables body extraction)",
+    )
     args = parser.parse_args()
 
+    body_extractor = BodySkeletonExtractor(args.body_model) if args.body_model else None
     pipeline = PreprocessPipeline(
         mapping_path=args.mapping,
         model_dir=args.model_dir,
         target_fps=args.fps,
+        body_extractor=body_extractor,
     )
 
     input_path = Path(args.input)

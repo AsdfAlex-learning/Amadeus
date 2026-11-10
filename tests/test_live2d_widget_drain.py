@@ -100,9 +100,7 @@ def test_buffer_is_bounded_and_counts_drops(widget) -> None:
         widget.push_params(_frame(i / 1000.0))
 
     assert widget.queued_frames == widget.capacity
-    assert widget.dropped_frames == 7, (
-        f"expected 7 counted drops, got {widget.dropped_frames}"
-    )
+    assert widget.dropped_frames == 7, f"expected 7 counted drops, got {widget.dropped_frames}"
 
 
 def test_parameter_names_are_mapped_to_live2d(widget) -> None:

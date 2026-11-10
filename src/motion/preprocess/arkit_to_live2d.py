@@ -100,12 +100,8 @@ class ARKitToLive2DMapper:
         """
         single = blendshapes.ndim == 1
         if single:
-            blendshapes = (
-                blendshapes.unsqueeze(0)
-                if hasattr(blendshapes, "unsqueeze")
-                else blendshapes[np.newaxis, :]
-            )
-            head_angles = head_angles[np.newaxis, :]
+            blendshapes = np.expand_dims(blendshapes, axis=0)
+            head_angles = np.expand_dims(head_angles, axis=0)
 
         T = blendshapes.shape[0]
         result = np.zeros((T, NUM_LIVE2D_PARAMS), dtype=np.float32)

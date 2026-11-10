@@ -16,6 +16,7 @@ Designed to run on a single GPU (8GB VRAM is sufficient). Logs to
 console and to <output_dir>/train.log. Sample GIFs and the loss
 curve land in <output_dir>/samples/ and <output_dir>/loss_curve.png.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -47,14 +48,17 @@ def main():
     parser.add_argument("--dataset_type", type=str, default="preprocessed")
     parser.add_argument("--val_split", type=float, default=0.1)
     parser.add_argument("--use_lora", action="store_true")
-    parser.add_argument("--sample_every", type=int, default=10,
-                        help="Save a sample GIF every N epochs (0=disable)")
+    parser.add_argument(
+        "--sample_every", type=int, default=10, help="Save a sample GIF every N epochs (0=disable)"
+    )
     args = parser.parse_args()
 
     # Use the project's train() function for the heavy lifting.
     # We re-import here so users can edit the file without restarting.
     import importlib
+
     import src.motion.training.train
+
     importlib.reload(src.motion.training.train)
     from src.motion.training.train import train
 
@@ -63,6 +67,7 @@ def main():
     log_file = args.output_dir / "train.log"
 
     import loguru
+
     logger = loguru.logger
     logger.add(str(log_file), rotation="50 MB", retention="7 days")
 
@@ -109,19 +114,27 @@ def main():
         val_split=args.val_split,
         use_lora=args.use_lora,
     )
-    print(f"\nTotal training time: {(time.time()-t0)/60:.1f} min")
+    print(f"\nTotal training time: {(time.time() - t0) / 60:.1f} min")
 
     # Render the loss curve from the log file
     try:
         import importlib
+
         import src.motion.training.visualize
+
         importlib.reload(src.motion.training.visualize)
         from src.motion.training.visualize import parse_train_log, plot_loss_curve
+
         eps, tl, vl, _ = parse_train_log(log_file)
         if eps:
             print(f"\nLoss curve: {len(eps)} epochs parsed")
-            plot_loss_curve(eps, tl, vl, args.output_dir / "loss_curve.png",
-                            title=f"Amadeus base model — {len(eps)} epochs")
+            plot_loss_curve(
+                eps,
+                tl,
+                vl,
+                args.output_dir / "loss_curve.png",
+                title=f"Amadeus base model — {len(eps)} epochs",
+            )
     except Exception as e:
         print(f"Loss curve rendering failed: {e}")
 

@@ -26,7 +26,6 @@ import pytest
 
 from src.runtime.concurrency import AudioRing, BoundedDropOldest, Mailbox
 
-
 # ── Mailbox: latest wins, non-consuming peek ─────────────────────────────────
 
 
@@ -167,7 +166,7 @@ def test_audio_ring_writer_does_not_touch_consumer_state():
 def test_audio_ring_consumer_falling_behind_is_counted():
     """When the reader is lapped, it resyncs to the newest data and reports it."""
     ring = AudioRing(capacity=4)
-    ring.write(np.arange(4, dtype=np.float32))   # consumer has not read
+    ring.write(np.arange(4, dtype=np.float32))  # consumer has not read
     ring.write(np.arange(4, 8, dtype=np.float32))  # lapped once
     assert list(ring.read(4)) == [4.0, 5.0, 6.0, 7.0]
     assert ring.dropped == 4

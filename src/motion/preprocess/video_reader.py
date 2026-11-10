@@ -7,6 +7,7 @@ Falls back to cv2.VideoCapture when ffmpeg is unavailable.
 import json
 import subprocess
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -269,7 +270,7 @@ class VideoReader:
         logger.info(f"Extracted {len(frames)} frames (cv2 fallback)")
         return frames
 
-    def iter_frames(self, fps: float | None = None) -> np.ndarray:
+    def iter_frames(self, fps: float | None = None) -> Iterator[np.ndarray]:
         """Yield frames as numpy arrays without writing to disk.
 
         Uses ffmpeg pipe output for streaming extraction.
@@ -307,6 +308,9 @@ class VideoReader:
             )
 
             frame_size = width * height * 3
+            if proc.stdout is None:
+                proc.terminate()
+                return
             while True:
                 raw = proc.stdout.read(frame_size)
                 if len(raw) < frame_size:
@@ -318,7 +322,7 @@ class VideoReader:
         except FileNotFoundError:
             yield from self._iter_frames_cv2(target_fps)
 
-    def _iter_frames_cv2(self, fps: float | None) -> np.ndarray:
+    def _iter_frames_cv2(self, fps: float | None) -> Iterator[np.ndarray]:
         """Fallback frame iteration using cv2."""
         import cv2
 

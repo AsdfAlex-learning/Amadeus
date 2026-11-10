@@ -7,7 +7,7 @@ from pathlib import Path
 # Ensure src is importable
 sys.path.insert(0, str(Path(__file__).parent))
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -31,19 +31,11 @@ def check_component(name: str, import_path: str) -> tuple[bool, str]:
 
 
 def check_hardware(name: str) -> tuple[bool, str]:
-    checks = {
-        "麦克风": ("src.audio.capture", "MicrophoneCapture"),
-        "摄像头": ("src.perception.camera", "CameraPerception"),
-        "Live2D 模型": ("assets/live2d", None),
-        "Whisper 模型": ("models/whisper", None),
-        "动作模型权重": ("models/motion/full_duplex_dit.pt", None),
-        "Ollama": ("http://localhost:11434", None),
-        "CUDA GPU": ("torch.cuda", None),
-    }
     if name == "麦克风":
         try:
             from src.audio.capture import MicrophoneCapture
             from src.config import load_config
+
             cfg = load_config()
             mic = MicrophoneCapture(cfg)
             devices = mic.get_audio_devices()
@@ -56,6 +48,7 @@ def check_hardware(name: str) -> tuple[bool, str]:
     elif name == "摄像头":
         try:
             import cv2
+
             cap = cv2.VideoCapture(0)
             ok = cap.isOpened()
             cap.release()
@@ -63,8 +56,13 @@ def check_hardware(name: str) -> tuple[bool, str]:
         except Exception:
             return False, "❌ cv2不可用"
     elif name in ("Live2D 模型", "Whisper 模型", "动作模型权重"):
-        p = Path(name.split()[-1] if name == "动作模型权重" else
-                 "assets/live2d" if "Live2D" in name else "models/whisper")
+        p = Path(
+            name.split()[-1]
+            if name == "动作模型权重"
+            else "assets/live2d"
+            if "Live2D" in name
+            else "models/whisper"
+        )
         if name == "动作模型权重":
             p = Path("models/motion/full_duplex_dit.pt")
         if name == "Whisper 模型":
@@ -83,6 +81,7 @@ def check_hardware(name: str) -> tuple[bool, str]:
     elif name == "Ollama":
         try:
             from urllib import request
+
             req = request.Request("http://localhost:11434/api/tags")
             request.urlopen(req, timeout=2)
             return True, "✅"
@@ -91,6 +90,7 @@ def check_hardware(name: str) -> tuple[bool, str]:
     elif name == "CUDA GPU":
         try:
             import torch
+
             if torch.cuda.is_available():
                 name = torch.cuda.get_device_name(0)
                 mem = torch.cuda.get_device_properties(0).total_mem // (1024**3)
@@ -159,29 +159,35 @@ class DemoWindow(QMainWindow):
 
     def _run_checks(self):
         checks = [
-            ("Python 库", [
-                ("PySide6", check_component("PySide6", "PySide6")),
-                ("live2d-py", check_component("live2d-py", "live2d")),
-                ("numpy", check_component("numpy", "numpy")),
-                ("pyaudio", check_component("pyaudio", "pyaudio")),
-                ("opencv", check_component("opencv", "cv2")),
-                ("mediapipe", check_component("mediapipe", "mediapipe")),
-                ("torch", check_component("torch", "torch")),
-                ("transformers", check_component("transformers", "transformers")),
-                ("pyyaml", check_component("pyyaml", "yaml")),
-                ("soundfile", check_component("soundfile", "soundfile")),
-                ("pyttsx3", check_component("pyttsx3", "pyttsx3")),
-                ("loguru", check_component("loguru", "loguru")),
-            ]),
-            ("硬件 & 模型", [
-                ("麦克风", check_hardware("麦克风")),
-                ("摄像头", check_hardware("摄像头")),
-                ("CUDA GPU", check_hardware("CUDA GPU")),
-                ("Live2D 模型", check_hardware("Live2D 模型")),
-                ("Whisper 模型", check_hardware("Whisper 模型")),
-                ("动作模型权重", check_hardware("动作模型权重")),
-                ("Ollama (对话)", check_hardware("Ollama")),
-            ]),
+            (
+                "Python 库",
+                [
+                    ("PySide6", check_component("PySide6", "PySide6")),
+                    ("live2d-py", check_component("live2d-py", "live2d")),
+                    ("numpy", check_component("numpy", "numpy")),
+                    ("pyaudio", check_component("pyaudio", "pyaudio")),
+                    ("opencv", check_component("opencv", "cv2")),
+                    ("mediapipe", check_component("mediapipe", "mediapipe")),
+                    ("torch", check_component("torch", "torch")),
+                    ("transformers", check_component("transformers", "transformers")),
+                    ("pyyaml", check_component("pyyaml", "yaml")),
+                    ("soundfile", check_component("soundfile", "soundfile")),
+                    ("pyttsx3", check_component("pyttsx3", "pyttsx3")),
+                    ("loguru", check_component("loguru", "loguru")),
+                ],
+            ),
+            (
+                "硬件 & 模型",
+                [
+                    ("麦克风", check_hardware("麦克风")),
+                    ("摄像头", check_hardware("摄像头")),
+                    ("CUDA GPU", check_hardware("CUDA GPU")),
+                    ("Live2D 模型", check_hardware("Live2D 模型")),
+                    ("Whisper 模型", check_hardware("Whisper 模型")),
+                    ("动作模型权重", check_hardware("动作模型权重")),
+                    ("Ollama (对话)", check_hardware("Ollama")),
+                ],
+            ),
         ]
 
         lines = []
@@ -196,14 +202,14 @@ class DemoWindow(QMainWindow):
             lines.append(f"  ── {ok_count}/{len(items)} 可用")
 
         lines.append(f"\n{'═' * 50}")
-        lines.append(f"  当前可用功能")
+        lines.append("  当前可用功能")
         lines.append(f"{'═' * 50}")
 
-        has_live2d = any("Live2D" in l and "✅" in l for l in lines)
-        has_audio = any("麦克风" in l and "✅" in l for l in lines)
-        has_camera = any("摄像头" in l and "✅" in l for l in lines)
-        has_ollama = any("Ollama" in l and "✅" in l for l in lines)
-        has_cuda = any("CUDA" in l and "✅" in l for l in lines)
+        has_live2d = any("Live2D" in line and "✅" in line for line in lines)
+        has_audio = any("麦克风" in line and "✅" in line for line in lines)
+        has_camera = any("摄像头" in line and "✅" in line for line in lines)
+        has_ollama = any("Ollama" in line and "✅" in line for line in lines)
+        has_cuda = any("CUDA" in line and "✅" in line for line in lines)
 
         if has_live2d:
             lines.append("  ✅ Live2D 角色渲染")
@@ -216,7 +222,9 @@ class DemoWindow(QMainWindow):
             self.ollama_status.setStyleSheet("color: #4a90d9; padding: 4px;")
         else:
             lines.append("  ⚠  对话不可用 (Ollama 未运行)")
-            self.ollama_status.setText("⚠ Ollama 未运行 — 对话不可用，启动: ollama serve && ollama pull qwen2.5:3b")
+            self.ollama_status.setText(
+                "⚠ Ollama 未运行 — 对话不可用，启动: ollama serve && ollama pull qwen2.5:3b"
+            )
             self.ollama_status.setStyleSheet("color: #d94a4a; padding: 4px;")
 
         if has_audio:
@@ -247,7 +255,7 @@ class DemoWindow(QMainWindow):
         if check_hardware("Ollama")[0]:
             self._ollama_chat(text)
         else:
-            self.status_area.append(f"🤖 Amadeus: (Ollama 未运行，无法回复)")
+            self.status_area.append("🤖 Amadeus: (Ollama 未运行，无法回复)")
 
     def _ollama_chat(self, text: str):
         from threading import Thread
@@ -257,11 +265,13 @@ class DemoWindow(QMainWindow):
                 import json
                 from urllib import request
 
-                payload = json.dumps({
-                    "model": "qwen2.5:3b",
-                    "messages": [{"role": "user", "content": text}],
-                    "stream": False,
-                }).encode()
+                payload = json.dumps(
+                    {
+                        "model": "qwen2.5:3b",
+                        "messages": [{"role": "user", "content": text}],
+                        "stream": False,
+                    }
+                ).encode()
                 req = request.Request("http://localhost:11434/api/chat", data=payload)
                 req.add_header("Content-Type", "application/json")
                 with request.urlopen(req, timeout=30) as resp:

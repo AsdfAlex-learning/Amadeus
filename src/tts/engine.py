@@ -30,7 +30,7 @@ class TTSEngine:
         return loaded
 
     def synthesize(self, text: str) -> np.ndarray:
-        if not self._loaded:
+        if not self._loaded or self._model is None:
             return self._silence(0.5)
         try:
             return self._model(text)

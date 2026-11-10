@@ -16,7 +16,6 @@ combined:
 
 from __future__ import annotations
 
-import threading
 import time
 
 import numpy as np
@@ -24,7 +23,6 @@ import pytest
 from PySide6.QtGui import QCloseEvent
 
 from src.audio.capture import MicrophoneCapture
-
 
 # ── TTS engine lifecycle ─────────────────────────────────────────────────────
 
