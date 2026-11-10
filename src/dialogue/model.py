@@ -10,6 +10,7 @@ is never stored in config or the repository).
 import json
 import os
 import select
+import socket
 import threading
 from collections.abc import Generator
 from http import client as http_client
@@ -65,9 +66,14 @@ def _open_stream(url: str, headers: dict, body: bytes, timeout: float):
 def _close_quietly(conn) -> None:
     # Do not call conn.close(): HTTPConnection.close() closes the response,
     # which deadlocks against the reader still blocked in readline (F-1).
+    # shutdown() wakes that reader even though the makefile keeps the fd open.
     sock = getattr(conn, "sock", None)
     if sock is None:
         return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
     try:
         sock.close()
     except Exception:
@@ -308,7 +314,7 @@ def _iter_lines(resp, conn, stop: threading.Event):
     sock: Any = getattr(conn, "sock", None)
     use_select = sock is not None and hasattr(sock, "fileno")
     while not stop.is_set():
-        if use_select and sock is not None:
+        if use_select and sock is not None and not _has_buffered_data(resp):
             try:
                 ready = select.select([sock], [], [], _STREAM_POLL_S)[0]
             except (OSError, ValueError):
@@ -319,3 +325,19 @@ def _iter_lines(resp, conn, stop: threading.Event):
         if not raw:
             return
         yield raw
+
+
+def _has_buffered_data(resp) -> bool:
+    """Return whether the response already buffered body bytes.
+
+    ``HTTPResponse.getresponse()`` can read the first body bytes into its
+    ``BufferedReader``. Selecting only the raw socket then blocks forever while
+    the reader waits for data that is already in the buffer.
+    """
+    fp = getattr(resp, "fp", None)
+    if fp is None or not hasattr(fp, "peek"):
+        return False
+    try:
+        return bool(fp.peek(0))
+    except Exception:
+        return False
