@@ -142,3 +142,18 @@ def test_worker_stops_on_cleanup(config: dict) -> None:
     capture.cleanup()
 
     assert not worker.is_alive(), "audio worker outlived cleanup()"
+
+
+def test_capture_degrades_when_pyaudio_cannot_initialize(config: dict, monkeypatch) -> None:
+    """A headless host without an audio backend must not crash the app."""
+    import src.audio.capture as capture_module
+
+    def fail():
+        raise OSError("no audio backend")
+
+    monkeypatch.setattr(capture_module.pyaudio, "PyAudio", fail)
+    capture = capture_module.MicrophoneCapture(config)
+
+    assert capture.get_audio_devices() == []
+    assert not capture.is_running
+    capture.cleanup()

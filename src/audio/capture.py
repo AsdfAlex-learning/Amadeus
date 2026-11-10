@@ -36,7 +36,11 @@ class MicrophoneCapture:
         self.chunk_size = int(audio_cfg["chunk_size"])
         self.device_index = audio_cfg.get("input_device")
 
-        self._audio = pyaudio.PyAudio()
+        try:
+            self._audio = pyaudio.PyAudio()
+        except Exception as e:
+            logger.warning(f"Audio backend unavailable ({e}); microphone capture disabled")
+            self._audio = None
         self._stream: pyaudio.Stream | None = None
         self._running = False
         self._callbacks: list[Callable[[np.ndarray], None]] = []
@@ -53,6 +57,9 @@ class MicrophoneCapture:
 
     def start(self):
         if self._running:
+            return
+        if self._audio is None:
+            logger.warning("Microphone capture unavailable: no audio backend")
             return
         self._running = True
         self._start_worker()
@@ -82,7 +89,8 @@ class MicrophoneCapture:
 
     def cleanup(self):
         self.stop()
-        self._audio.terminate()
+        if self._audio is not None:
+            self._audio.terminate()
         self._callbacks.clear()
 
     def on_audio(self, callback: Callable[[np.ndarray], None]):
@@ -184,6 +192,8 @@ class MicrophoneCapture:
     # ── introspection ────────────────────────────────────────────────────────
 
     def get_audio_devices(self) -> list[dict]:
+        if self._audio is None:
+            return []
         devices = []
         for i in range(self._audio.get_device_count()):
             info = self._audio.get_device_info_by_index(i)
