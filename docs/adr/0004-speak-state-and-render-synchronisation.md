@@ -10,12 +10,6 @@
 
 Accepted (implemented; merged via PR #1 on 2026-11-26). D1 was revised after Oracle review - see "Review outcome".
 
-## Alternatives considered
-
-- **Indexing the speech window at the playback position** (`audio[played : played + chunk]`): rejected - it skips every un-inferred window between the cursor and playback, the mid-utterance skip the design exists to avoid. Playback gates the advance; it does not index it.
-- **The original D1** (SpeechStream consumed purely against the playback clock) was revised after Oracle review to the gated-cursor design recorded under "D1 revised".
-- **Rate-matched drain vs frame-drop for `render_q`**: resolved as D2 (drain rate-matched to the display, hold the last applied frame, decay to neutral on sustained underflow).
-
 ## Context
 
 ADR 0003 Stage 1 is implemented: the PortAudio callback only enqueues, ASR runs on
@@ -156,6 +150,12 @@ timer → renderer cleanup. Each join keeps the ADR 0003 escalation policy
 Every worker loop catches, logs and continues, with a consecutive-failure circuit
 breaker that stops the worker so a persistent fault is *visible*. Already
 implemented for motion; extend to ASR (partially done) and playback.
+
+## Alternatives considered
+
+- **Indexing the speech window at the playback position** (`audio[played : played + chunk]`): rejected - it skips every un-inferred window between the cursor and playback, the mid-utterance skip the design exists to avoid. Playback gates the advance; it does not index it.
+- **The original D1** (SpeechStream consumed purely against the playback clock) was revised after Oracle review to the gated-cursor design recorded under "D1 revised".
+- **Rate-matched drain vs frame-drop for `render_q`**: resolved as D2 (drain rate-matched to the display, hold the last applied frame, decay to neutral on sustained underflow).
 
 ## Consequences
 

@@ -268,6 +268,7 @@ def main():
             # the --fps axis compressed the ground truth 2x in time.
             from src.motion.training.dataset import MotionDataset
 
+            # _resample_motion is shared with MotionDataset (same 25->50 Hz job).
             gt = MotionDataset._resample_motion(gt, gt_fps, float(args.fps))
         pred = np.load(args.pred_npy)
         T = min(len(gt), len(pred))
