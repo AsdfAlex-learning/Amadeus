@@ -168,6 +168,8 @@ def test_a_start_stop_start_cycle_registers_the_capture_callback_once(config, mo
     pipeline.start()
     try:
         registered = pipeline.capture._callbacks.count(pipeline._on_audio_chunk)
-        assert registered == 1, f"the VAD consumer is registered {registered} times after a toggle cycle"
+        assert registered == 1, (
+            f"the VAD consumer is registered {registered} times after a toggle cycle"
+        )
     finally:
         pipeline.cleanup()

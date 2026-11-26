@@ -305,9 +305,7 @@ def test_sample_every_renders_a_gif_per_interval(
         **{**_TINY_TRAIN_KWARGS, "num_epochs": 2, "sample_every": 1},
     )
 
-    samples = (
-        sorted((run / "samples").glob("epoch_*.gif")) if (run / "samples").exists() else []
-    )
+    samples = sorted((run / "samples").glob("epoch_*.gif")) if (run / "samples").exists() else []
     assert [p.name for p in samples] == ["epoch_0001.gif", "epoch_0002.gif"], (
         f"sample_every=1 over 2 epochs should render one GIF per epoch; "
         f"got {[p.name for p in samples]}"

@@ -171,7 +171,9 @@ def test_supersede_speech_drops_the_active_utterance(config: dict) -> None:
     assert engine._tts_pending.peek() is None
 
 
-def test_an_interrupt_landing_during_synthesize_does_not_rearm_playback(window, monkeypatch) -> None:
+def test_an_interrupt_landing_during_synthesize_does_not_rearm_playback(
+    window, monkeypatch
+) -> None:
     """The cancel window between the pre-check and play() must be closed.
 
     ``tts_engine.synthesize`` takes hundreds of milliseconds to seconds. If a
