@@ -269,3 +269,38 @@ def test_cancel_generation_sets_the_stream_cancel_event(window, monkeypatch) -> 
         lambda: window._generation_thread is not None and not window._generation_thread.is_alive()
     )
     assert generation_id not in window._generation_cancel_events, "cancel event not cleaned up"
+
+
+def test_a_second_turn_while_a_generation_is_in_flight_is_answered_not_dropped(
+    window, monkeypatch
+) -> None:
+    """A turn arriving mid-generation must supersede, not vanish.
+
+    The second utterance's onset fires before its transcript exists, so it
+    interrupts without starting anything; the late first transcript then starts
+    a generation, and the second transcript must take over instead of hitting
+    the busy guard - a dropped turn is a user message recorded in the context
+    that never receives any answer.
+    """
+    monkeypatch.setattr(type(window.tts_engine), "is_loaded", property(lambda self: False))
+    calls: list[list[str]] = []
+
+    def slow(_messages, **_kw):
+        calls.append([m["content"] for m in _messages])
+        for _ in range(50):
+            yield "x"
+            time.sleep(0.02)
+
+    monkeypatch.setattr(window.dialogue_model, "generate", slow)
+
+    window._handle_text("first")
+    assert _wait_until(lambda: len(calls) == 1), "the first turn never started a generation"
+    first_id = window._generation_id
+
+    window._handle_text("second")
+    assert _wait_until(lambda: len(calls) == 2, timeout=2.0), (
+        "the second turn never started a generation; its user message is recorded "
+        "but will never be answered"
+    )
+    assert "second" in calls[1], "the replacement generation must answer the second turn"
+    assert window._is_generation_cancelled(first_id), "the superseded generation was not cancelled"

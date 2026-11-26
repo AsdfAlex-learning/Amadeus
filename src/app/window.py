@@ -67,6 +67,7 @@ class AmadeusWindow(QMainWindow):
         self._generation_cancel_events: dict[int, threading.Event] = {}
         self._shutting_down = False
         self._generation_thread: threading.Thread | None = None
+        self._stale_generation_threads: list[threading.Thread] = []
         # T7: owns the output stream and publishes playback position. It creates
         # its own PyAudio instance, so no shared instance is raced by concurrent
         # generation threads.
@@ -223,7 +224,11 @@ class AmadeusWindow(QMainWindow):
 
     def _start_generation(self):
         if self._generating:
-            return
+            # Supersede rather than drop: the user message is already in the
+            # context, and a dropped turn is a question that never receives an
+            # answer. The same rule as VAD interruption: cancel the in-flight
+            # generation, then start the replacement.
+            self._cancel_generation()
         self._generating = True
         self.status_label.setText("◉ 思考中...")
         self.conversation_display.append(
@@ -237,6 +242,11 @@ class AmadeusWindow(QMainWindow):
         generation_id = self._generation_id
         cancel_event = threading.Event()
         self._generation_cancel_events[generation_id] = cancel_event
+        stale = self._generation_thread
+        if stale is not None and stale.is_alive():
+            # Superseded mid-flight: keep it joinable at shutdown instead of
+            # overwriting the only handle closeEvent knows about.
+            self._stale_generation_threads.append(stale)
         self._generation_thread = threading.Thread(
             target=self._run_generation,
             args=(generation_id, cancel_event),
@@ -405,17 +415,20 @@ class AmadeusWindow(QMainWindow):
         super().closeEvent(event)
 
     def _join_generation_thread(self):
-        thread, self._generation_thread = self._generation_thread, None
-        if thread is None:
-            return
-        thread.join(timeout=self.GENERATION_JOIN_TIMEOUT_S)
-        if thread.is_alive():
-            # Escalation policy (ADR 0003): the local-transformers path runs the
-            # whole generation inside one blocking model.generate call, so it
-            # cannot honour cancellation between chunks. Leak the daemon rather
-            # than release resources it may still be using.
-            logger.warning(
-                "Generation thread did not stop within %.0f s; leaking it (daemon)",
-                self.GENERATION_JOIN_TIMEOUT_S,
-            )
-            self._generation_thread = thread
+        threads = self._stale_generation_threads + [self._generation_thread]
+        self._stale_generation_threads = []
+        self._generation_thread = None
+        for thread in threads:
+            if thread is None:
+                continue
+            thread.join(timeout=self.GENERATION_JOIN_TIMEOUT_S)
+            if thread.is_alive():
+                # Escalation policy (ADR 0003): a cancelled generation can be
+                # blocked inside a long streaming read or a TTS synthesis, which
+                # cannot honour cancellation between chunks. Leak the daemon
+                # rather than release resources it may still be using.
+                logger.warning(
+                    "Generation thread did not stop within %.0f s; leaking it (daemon)",
+                    self.GENERATION_JOIN_TIMEOUT_S,
+                )
+                self._generation_thread = thread
