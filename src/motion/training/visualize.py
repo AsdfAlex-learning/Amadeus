@@ -259,7 +259,16 @@ def main():
         print(f"Parsed {len(eps)} epochs from {args.log}")
         plot_loss_curve(eps, tl, vl, args.out)
     elif args.cmd == "motion":
-        gt = np.load(args.gt_npz)["live2d_params"]
+        data = np.load(args.gt_npz)
+        gt = data["live2d_params"]
+        gt_fps = float(data["fps"]) if "fps" in data else 25.0
+        if gt_fps != float(args.fps):
+            # Ground truth is extracted at preprocess fps (25 by default) while
+            # predictions live on the model's 50 Hz axis; plotting raw rows on
+            # the --fps axis compressed the ground truth 2x in time.
+            from src.motion.training.dataset import MotionDataset
+
+            gt = MotionDataset._resample_motion(gt, gt_fps, float(args.fps))
         pred = np.load(args.pred_npy)
         T = min(len(gt), len(pred))
         gt = gt[:T]

@@ -1,5 +1,11 @@
 """Shared fixtures and hermetic-environment guard for the Amadeus test suite.
 
+One documented exception to the no-network rule: the dialogue streaming tests
+bind real sockets on 127.0.0.1 only (loopback), because the Windows socket
+teardown iron laws - shutdown/close waking a blocked reader - can only be
+pinned against the real http.client stack (ADR 0005, Oracle review F-1). No
+external network is ever reached.
+
 These tests must not touch the network, the microphone, the camera, or the
 ~400 MB of pretrained encoder weights. We therefore force the HuggingFace /
 transformers stack into offline mode *before* it is imported anywhere, so the

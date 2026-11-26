@@ -651,3 +651,45 @@ def test_two_runs_with_the_same_settings_produce_identical_weights(
         assert torch.equal(tensor, second["model"][key]), (
             f"weight {key!r} differs between two identical runs; training is not reproducible"
         )
+
+
+def test_motion_comparison_resamples_ground_truth_to_the_comparison_rate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Ground truth is extracted at preprocess fps; predictions live at 50 Hz.
+
+    The comparison subcommand plotted raw npz rows on the --fps axis (default
+    50), compressing 25 fps ground truth 2x in time - every overlay was
+    misaligned.
+    """
+    import sys
+
+    import src.motion.training.visualize as visualize
+
+    gt_npz = tmp_path / "gt.npz"
+    np.savez(
+        gt_npz,
+        live2d_params=np.zeros((50, 45), dtype=np.float32),
+        fps=np.float32(25.0),
+    )
+    pred_npy = tmp_path / "pred.npy"
+    np.save(pred_npy, np.zeros((100, 45), dtype=np.float32))
+
+    captured = {}
+    monkeypatch.setattr(
+        visualize,
+        "plot_motion_comparison",
+        lambda gt, pred, out, fps=50: captured.update(gt=gt, pred=pred, fps=fps),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["visualize", "motion", "--gt_npz", str(gt_npz), "--pred_npy", str(pred_npy),
+         "--out", str(tmp_path / "out.png")],
+    )
+    visualize.main()
+
+    assert captured["gt"].shape == (100, 45), (
+        f"ground truth reached the comparison as {captured['gt'].shape}; 50 rows "
+        f"at 25 fps must be resampled to 100 rows at the 50 Hz comparison rate"
+    )
