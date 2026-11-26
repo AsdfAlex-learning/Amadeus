@@ -245,7 +245,10 @@ def train(
             else:
                 loss.backward()
 
-            if (batch_idx + 1) % grad_accum_steps == 0:
+            # Step on every full group AND on the tail of the epoch: leftover
+            # batches would otherwise be zeroed by the next zero_grad() without
+            # ever stepping (M-19).
+            if (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(dataloader):
                 if scaler is not None:
                     scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)

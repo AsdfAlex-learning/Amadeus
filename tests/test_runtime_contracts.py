@@ -250,6 +250,43 @@ def test_the_final_snapshot_records_the_last_completed_epoch(
     )
 
 
+def test_gradient_accumulation_does_not_drop_the_tail_of_each_epoch(
+    tiny_preprocessed_dataset: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Batches that never fill an accumulation group must still train.
+
+    The step ran only on ``(batch_idx + 1) % grad_accum_steps == 0``, so the
+    leftover batches of every epoch were discarded: their gradients were
+    zeroed by the next epoch's ``zero_grad()`` without ever stepping. With the
+    training guide's own config (270 train batches, accumulation of 4) that
+    silently dropped two batches of every epoch.
+    """
+    import torch
+
+    from src.motion.training.train import train
+
+    steps = 0
+    original_step = torch.optim.AdamW.step
+
+    def counting_step(self, *args, **kwargs):
+        nonlocal steps
+        steps += 1
+        return original_step(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim.AdamW, "step", counting_step)
+
+    # The 1-sample dataset gives 1 batch per epoch; a group of 2 makes it a tail.
+    train(
+        data_dir=tiny_preprocessed_dataset,
+        output_dir=tmp_path / "run",
+        **{**_TINY_TRAIN_KWARGS, "grad_accum_steps": 2},
+    )
+    assert steps == 1, (
+        f"an epoch of batches that never filled an accumulation group produced "
+        f"{steps} optimizer steps; the tail group must not be dropped"
+    )
+
+
 # ── C-8: persona performance parameters must reach the output ────────────────
 
 
