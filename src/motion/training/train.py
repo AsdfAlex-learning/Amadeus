@@ -32,6 +32,9 @@ def train(
     warmup_steps: int = 100,
     early_stopping_patience: int = 0,
     ema_decay: float = 0.0,
+    #: Render a model-motion GIF every N epochs into ``output_dir/samples``
+    #: (0 = off). Fixed noise/timestep, so GIFs show progress on the same clip.
+    sample_every: int = 0,
     # ── LoRA ──
     use_lora: bool = False,
     lora_rank: int = 8,
@@ -353,6 +356,18 @@ def train(
                 )
                 logger.info(f"Checkpoint saved: {checkpoint_path}")
 
+        if sample_every > 0 and (epoch + 1) % sample_every == 0:
+            sample_loader = val_loader if val_loader is not None else dataloader
+            _write_epoch_sample(
+                model,
+                sample_loader,
+                device,
+                num_diffusion_steps,
+                _alphas_cumprod,
+                scaler,
+                output_dir / "samples" / f"epoch_{epoch + 1:04d}.gif",
+            )
+
     # Final save
     if use_lora:
         final_lora_path = output_dir / "lora_adapter.pt"
@@ -416,6 +431,54 @@ def _save_full_checkpoint(
     if ema is not None:
         payload["ema"] = ema.state_dict()
     torch.save(payload, path)
+
+
+def _write_epoch_sample(
+    model,
+    loader,
+    device: str,
+    num_diffusion_steps: int,
+    alphas_cumprod: torch.Tensor,
+    scaler,
+    out_path: Path,
+) -> None:
+    """Render one GIF of the model's predicted motion for a fixed clip.
+
+    The noise and timestep are fixed across epochs, so consecutive GIFs show
+    progress on the same corruption of the same clip ("has it learned
+    anything"). Best effort: sampling must never kill a long run.
+    """
+    try:
+        batch = next(iter(loader))
+        audio = batch["user_audio"].to(device)
+        motion = batch["motion"].to(device)
+        B = audio.shape[0]
+        tts_audio = batch.get("tts_audio", torch.zeros_like(audio)).to(device)
+        visual = batch.get("visual_frames", torch.zeros(B, 5, 3, 224, 224, device=device)).to(
+            device
+        )
+        identity = batch.get("identity_id", torch.zeros(B, dtype=torch.long, device=device)).to(
+            device
+        )
+        prompts = batch.get("text_prompt", [""] * B)
+        if not isinstance(prompts, list):
+            prompts = [""] * B
+
+        gen = torch.Generator().manual_seed(0)
+        t = torch.full((B,), num_diffusion_steps // 2, dtype=torch.long, device=device)
+        noise = torch.randn(motion.shape, generator=gen).to(device)
+        alpha_cumprod_t = alphas_cumprod[t].unsqueeze(-1).unsqueeze(-1).to(device)
+        noisy = torch.sqrt(alpha_cumprod_t) * motion + torch.sqrt(1.0 - alpha_cumprod_t) * noise
+
+        with torch.amp.autocast(device_type=device, enabled=scaler is not None):
+            pred = model(audio, tts_audio, visual, prompts, identity, t, noisy)
+        frames = pred[0].detach().float().clamp(0.0, 1.0).cpu().numpy()
+
+        from src.motion.training.visualize import motion_to_gif
+
+        motion_to_gif(frames, out_path, fps=25)
+    except Exception as e:
+        logger.warning(f"Epoch sample rendering failed (training continues): {e}")
 
 
 if __name__ == "__main__":

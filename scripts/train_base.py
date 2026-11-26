@@ -90,6 +90,7 @@ def main():
     print(f"  device:         {args.device}")
     print(f"  AMP:            {args.use_amp}")
     print(f"  LoRA:           {args.use_lora}")
+    print(f"  sample_every:   {args.sample_every}")
     print(f"  log file:       {log_file}")
     print("=" * 60)
 
@@ -113,6 +114,7 @@ def main():
         dataset_type=args.dataset_type,
         val_split=args.val_split,
         use_lora=args.use_lora,
+        sample_every=args.sample_every,
     )
     print(f"\nTotal training time: {(time.time() - t0) / 60:.1f} min")
 

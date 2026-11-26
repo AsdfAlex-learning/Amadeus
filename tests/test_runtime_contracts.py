@@ -287,6 +287,34 @@ def test_gradient_accumulation_does_not_drop_the_tail_of_each_epoch(
     )
 
 
+def test_sample_every_renders_a_gif_per_interval(
+    tiny_preprocessed_dataset: Path, tmp_path: Path
+) -> None:
+    """``--sample_every`` is advertised as the way to watch learning happen.
+
+    The flag existed and its help promised "Save a sample GIF every N epochs",
+    but nothing read it: a 200-epoch overnight run produced zero samples and
+    no error.
+    """
+    from src.motion.training.train import train
+
+    run = tmp_path / "run"
+    train(
+        data_dir=tiny_preprocessed_dataset,
+        output_dir=run,
+        **{**_TINY_TRAIN_KWARGS, "num_epochs": 2, "sample_every": 1},
+    )
+
+    samples = (
+        sorted((run / "samples").glob("epoch_*.gif")) if (run / "samples").exists() else []
+    )
+    assert [p.name for p in samples] == ["epoch_0001.gif", "epoch_0002.gif"], (
+        f"sample_every=1 over 2 epochs should render one GIF per epoch; "
+        f"got {[p.name for p in samples]}"
+    )
+    assert all(p.stat().st_size > 0 for p in samples), "a rendered sample GIF is empty"
+
+
 # ── C-8: persona performance parameters must reach the output ────────────────
 
 
