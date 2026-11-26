@@ -185,6 +185,13 @@ class PerformanceEngine:
                 self._param_indices[name] = int(idx)
 
         if not self._param_indices:
+            # The shipped schema names the parameters in output order
+            # (preprocess/mappings/default.yaml `live2d_param_order`): position
+            # in the list IS the target index.
+            order = data.get("live2d_param_order") or []
+            self._param_indices = {name: i for i, name in enumerate(order)}
+
+        if not self._param_indices:
             logger.warning(f"No params with target_index found in {path}, using heuristic")
             self._use_heuristic_mapping()
             return
@@ -211,12 +218,21 @@ class PerformanceEngine:
         )
 
     def _use_heuristic_mapping(self) -> None:
-        """Fall back to heuristic index-based mapping."""
-        self._mouth_indices = [i for i in range(6)]  # first 6: mouth-related
-        self._eye_indices = [i for i in range(6, 20)]  # eyes, brows
-        self._face_indices = list(range(0, 20))
-        self._head_indices = list(range(31, 40))
-        self._other_indices = list(range(20, 31)) + list(range(40, 45))
+        """Fall back to an index mapping mirroring the default param order.
+
+        ``preprocess/mappings/default.yaml``'s ``live2d_param_order`` is the
+        45-slot contract: head/body angles 0-5, eyes/gaze/brows 6-13, mouth
+        14-15. The previous fallback claimed "first 6: mouth-related", which
+        clipped head motion to mouth_open_max and scaled the mouth as eyes.
+        """
+        self._param_indices = {}
+        self._mouth_indices = [14, 15]
+        self._eye_indices = [6, 7, 8, 9, 10, 11, 12, 13]
+        self._face_indices = self._mouth_indices + self._eye_indices
+        self._head_indices = [0, 1, 2, 3, 4, 5]
+        self._other_indices = [
+            i for i in range(45) if i not in set(self._face_indices + self._head_indices)
+        ]
         self._num_params = 45
         logger.info("Using heuristic param mapping (45 params)")
 

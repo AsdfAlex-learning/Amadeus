@@ -467,3 +467,54 @@ def test_listen_step_consumes_exactly_one_chunk(config: dict) -> None:
     assert len(engine._audio_buffer) == 0, (
         f"{len(engine._audio_buffer)} samples were left over after draining four chunks"
     )
+
+
+# ── C-8: the category mapping must come from the mapping file ────────────────
+
+
+def test_the_default_mapping_file_loads_instead_of_falling_back_to_the_heuristic(
+    project_root: Path,
+) -> None:
+    """The shipped mapping must drive the categories, not the fallback.
+
+    ``_load_mapping`` expected a ``params``/``target_index`` schema the shipped
+    YAML does not have (it names the parameters in output order under
+    ``live2d_param_order``), so every run fell back to a heuristic whose
+    categories contradict the real 45-slot order: head/body angles were scaled
+    and clipped as mouth (halving head motion), the mouth scaled as eyes, and
+    the tear/blush block as head.
+    """
+    from src.motion.performance import PerformanceEngine
+
+    engine = PerformanceEngine(
+        mapping_path=project_root / "src" / "motion" / "preprocess" / "mappings" / "default.yaml"
+    )
+    assert engine._param_indices, "the mapping file did not load; the heuristic fallback ran"
+    assert sorted(engine._head_indices) == [0, 1, 2, 3, 4, 5], (
+        f"head/body angles live in slots 0-5, classified as {sorted(engine._head_indices)}"
+    )
+    assert 14 in engine._mouth_indices and 15 in engine._mouth_indices, (
+        f"ParamMouthOpenY/ParamMouthForm live in slots 14-15, classified as "
+        f"{sorted(engine._mouth_indices)}"
+    )
+    for slot in (0, 1, 2, 3, 4, 5):
+        assert slot not in engine._mouth_indices, (
+            f"head/body angle slot {slot} is classified as mouth; it would be "
+            f"clipped to mouth_open_max"
+        )
+    for slot in (6, 7, 10, 13):  # eyes and brows
+        assert slot in engine._eye_indices, f"eye/brow slot {slot} is not classified as eye"
+
+
+def test_the_heuristic_fallback_categories_match_the_real_parameter_order() -> None:
+    """The fallback must mirror the default 45-slot order it stands in for.
+
+    It claimed "first 6: mouth-related", but slots 0-5 are the head/body
+    angles and the mouth lives at 14-15.
+    """
+    from src.motion.performance import PerformanceEngine
+
+    engine = PerformanceEngine()
+    assert sorted(engine._mouth_indices) == [14, 15]
+    assert sorted(engine._head_indices) == [0, 1, 2, 3, 4, 5]
+    assert sorted(engine._eye_indices) == [6, 7, 8, 9, 10, 11, 12, 13]
