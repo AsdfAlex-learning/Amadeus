@@ -317,14 +317,19 @@ class AmadeusWindow(QMainWindow):
             audio_data = self.tts_engine.synthesize(text)
             if audio_data is None or len(audio_data) == 0:
                 return
+            # One id for both clocks: the motion engine tracks its utterance by
+            # this id and tells "still playing" from "played out" by matching it
+            # against the playback worker's published stream ids. Independent
+            # counters would compare unrelated numbers and wedge the Speak state.
+            self._stream_seq += 1
+            stream_id = self._stream_seq
             # Feed the motion engine the spoken audio (its Speak conditioning).
-            self.motion_model.process_tts_audio(audio_data)
+            self.motion_model.process_tts_audio(audio_data, stream_id=stream_id)
             # Playback runs on its own thread (T7) so that it can publish an
             # incremental playback position and be interrupted. Previously this
             # did one blocking stream.write() on the generation thread, which made
             # the position visible only at the end and made interruption unsafe.
-            self._stream_seq += 1
-            self._playback.play(self._stream_seq, audio_data)
+            self._playback.play(stream_id, audio_data)
         except Exception as e:
             logger.error(f"TTS playback error: {e}")
 

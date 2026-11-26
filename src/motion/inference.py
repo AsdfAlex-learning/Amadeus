@@ -309,12 +309,19 @@ class DiffusionMotionInference:
         self._audio_buffer.extend(audio.tolist())
         self._try_infer()
 
-    def process_tts_audio(self, audio: np.ndarray, sample_rate: int | None = None):
+    def process_tts_audio(
+        self, audio: np.ndarray, sample_rate: int | None = None, stream_id: int | None = None
+    ) -> None:
         """Buffer synthesized speech for the Speak state, at the pipeline rate.
 
         ``sample_rate`` defaults to the configured TTS rate. Callers should pass
         it explicitly when the backend's true rate differs from
         ``config.tts.sample_rate``; otherwise the duration is silently wrong.
+
+        ``stream_id`` identifies the utterance to the playback worker, so the
+        Speak-state clock can tell which stream it is tracking (and when that
+        stream is done). It defaults to an internal counter; callers that also
+        drive ``PlaybackWorker.play`` must pass the same id they play it under.
         """
         if not self._loaded or (self._model is None and not self._use_baseline):
             return
@@ -326,8 +333,12 @@ class DiffusionMotionInference:
         # Publish as a *retained* stream, already at the pipeline rate, so the
         # reader never has to mix sample rates. A single slot: a newer utterance
         # supersedes a pending one, never the one currently being read. (S2.4)
-        self._speech_seq += 1
-        self._tts_pending.put((self._speech_seq, resampled))
+        if stream_id is None:
+            self._speech_seq += 1
+            stream_id = self._speech_seq
+        else:
+            self._speech_seq = max(self._speech_seq, int(stream_id))
+        self._tts_pending.put((int(stream_id), resampled))
         # C-6: TTS must be able to advance the engine on its own, otherwise the
         # character stands still for the whole spoken response.
         if self._motion_worker is not None:
@@ -484,6 +495,12 @@ class DiffusionMotionInference:
                 self.supersede_speech()
             return False
 
+        if self._speech is not None and self._speech_inferred >= int(self._speech[1].size):
+            # Drained. Fall through so a queued utterance is promoted in the
+            # same tick instead of waiting for the next wake: an utterance that
+            # was pending must never be starved behind a finished one.
+            self._speech = None
+
         if self._speech is None:
             promoted = self._tts_pending.get()
             if promoted is None:
@@ -498,6 +515,17 @@ class DiffusionMotionInference:
             self._speech = None
             return False
 
+        # Playback records the streams it is done with (played out, interrupted,
+        # or superseded before starting), and each of those resets
+        # ``played_samples`` to 0, which looks exactly like "not started yet".
+        # Once playback is done with this stream the cursor free-runs, so the
+        # zero-padded tail is authorised unconditionally instead of waiting on a
+        # clock that will never advance again.
+        if self._playback is not None:
+            finished = getattr(self._playback, "finished_stream_ids", None)
+            if finished is not None and _stream_id in finished:
+                return True
+
         played = self._played_pipeline_samples()
         max_lag = int(self._max_lag_s * self.sample_rate)
         if played - self._speech_inferred > max_lag:
@@ -509,7 +537,13 @@ class DiffusionMotionInference:
 
         lookahead = int(self.SPEECH_LOOKAHEAD_SECONDS * self.sample_rate)
         gate = min(played + lookahead, total)
-        return self._speech_inferred + chunk_samples <= gate
+        # The last window is zero-padded by ``_pop_speech_chunk`` (most TTS audio
+        # does not end on a chunk boundary), so gate on the *real* remaining
+        # audio. Demanding a whole chunk inside the gate would forbid that tail
+        # forever, leaving ``_speech_inferred`` short of ``total`` - the utterance
+        # would never clear and the Silence driver would stay blocked.
+        need = min(chunk_samples, total - self._speech_inferred)
+        return self._speech_inferred + need <= gate
 
     def _pop_speech_chunk(self, chunk_samples: int) -> np.ndarray:
         if self._speech is None:

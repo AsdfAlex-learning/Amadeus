@@ -165,6 +165,107 @@ def test_microphone_is_zeroed_while_speaking(config: dict) -> None:
         )
 
 
+class _StreamingFakePlayback:
+    """Models what PlaybackWorker publishes: stream identity and end-of-stream."""
+
+    def __init__(self, played: int = 0) -> None:
+        self.played_samples = played
+        self.current_stream_id: int | None = None
+        self.finished_stream_ids: set[int] = set()
+
+    def start(self, stream_id: int) -> None:
+        self.current_stream_id = stream_id
+        self.played_samples = 0
+
+    def finish(self, stream_id: int) -> None:
+        self.current_stream_id = None
+        self.finished_stream_ids.add(stream_id)
+        self.played_samples = 0
+
+
+def test_a_non_aligned_utterance_performs_its_zero_padded_tail_and_clears(config: dict) -> None:
+    """The final partial window must run, or Speak state never ends.
+
+    ``_pop_speech_chunk`` zero-pads a tail shorter than one chunk by design, so
+    almost every real TTS utterance ends mid-chunk. If the gate demands a whole
+    chunk inside the lookahead, that tail is never authorised, the cursor never
+    reaches the end, and the always-on Silence driver is blocked for the rest of
+    the conversation.
+    """
+    steps: list[tuple[np.ndarray, np.ndarray]] = []
+    engine = _engine(config, steps)
+    playback = _StreamingFakePlayback()
+    engine.attach_playback(playback, playback_rate=RATE)
+    engine.SPEECH_LOOKAHEAD_SECONDS = 1.0
+
+    engine.process_tts_audio(_ramp(2.5), sample_rate=RATE)  # 40 000 samples
+    assert len(steps) == 1
+
+    playback.start(1)
+    playback.played_samples = 2 * RATE
+    engine.process_user_audio(np.zeros(1, dtype=np.float32))  # wake the engine
+
+    assert len(steps) == 3, (
+        f"the 8000-sample zero-padded tail must run as a third step and clear the "
+        f"utterance; got {len(steps)} steps"
+    )
+    assert not engine.speech_active, "Speak state must end once the tail has been performed"
+    _user, tail = steps[2]
+    assert float(np.abs(tail[8000:]).sum()) == 0.0, "samples past the real audio must be zeros"
+    assert float(np.abs(tail[:8000]).sum()) > 0.0, "the real tail audio must not be zeroed"
+
+
+def test_a_finished_stream_drains_its_tail_after_the_playback_clock_resets(config: dict) -> None:
+    """End-of-stream resets the playback clock to 0; the tail must still drain.
+
+    ``PlaybackWorker._play_stream`` zeroes ``played_samples`` when the stream
+    ends. A tail that was not popped before that reset would see a closed gate
+    forever, so stream completion itself has to authorise the last window.
+    """
+    steps: list[tuple[np.ndarray, np.ndarray]] = []
+    engine = _engine(config, steps)
+    playback = _StreamingFakePlayback()
+    engine.attach_playback(playback, playback_rate=RATE)
+    engine.SPEECH_LOOKAHEAD_SECONDS = 1.0
+
+    engine.process_tts_audio(_ramp(2.5), sample_rate=RATE)
+    playback.start(1)
+    playback.played_samples = RATE  # gate = 2 s < 2.5 s: the tail stays closed
+    engine.process_user_audio(np.zeros(1, dtype=np.float32))
+    assert len(steps) == 2
+
+    playback.finish(1)  # the clock resets to 0 exactly as PlaybackWorker does
+    engine.process_user_audio(np.zeros(1, dtype=np.float32))
+
+    assert len(steps) == 3, "the tail must drain once playback is done with the stream"
+    assert not engine.speech_active
+
+
+def test_the_next_utterance_is_promoted_after_the_previous_tail_drains(config: dict) -> None:
+    """A wedged tail would starve every utterance queued behind it."""
+    steps: list[tuple[np.ndarray, np.ndarray]] = []
+    engine = _engine(config, steps)
+    playback = _StreamingFakePlayback()
+    engine.attach_playback(playback, playback_rate=RATE)
+    engine.SPEECH_LOOKAHEAD_SECONDS = 1.0
+
+    engine.process_tts_audio(_ramp(2.5), sample_rate=RATE)  # stream 1
+    playback.start(1)
+    playback.played_samples = RATE
+    engine.process_tts_audio(_ramp(2.5), sample_rate=RATE)  # stream 2 pending
+    playback.finish(1)
+    engine.process_user_audio(np.zeros(1, dtype=np.float32))  # wake the engine
+
+    assert engine.speech_active and engine._speech[0] == 2, (
+        f"stream 2 must be promoted after stream 1 drains; active is "
+        f"{None if engine._speech is None else engine._speech[0]}"
+    )
+    assert len(steps) == 4, (
+        f"expected two windows for stream 1 (full + padded tail) and one for the "
+        f"promoted stream 2; got {len(steps)}"
+    )
+
+
 def test_a_new_utterance_supersedes_a_pending_one_not_the_active_one(config: dict) -> None:
     """Dropping the *active* stream would jump mid-utterance."""
     steps: list[tuple[np.ndarray, np.ndarray]] = []

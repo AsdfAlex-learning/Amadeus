@@ -88,6 +88,7 @@ class PlaybackWorker:
 
         self._played = 0
         self._current_stream_id: int | None = None
+        self._finished_stream_ids: set[int] = set()
         self._failures = 0
         self._failed = False
         self._underruns = 0
@@ -127,7 +128,9 @@ class PlaybackWorker:
         """Queue an utterance, superseding any utterance still pending."""
         fused = np.asarray(audio, dtype=np.float32)
         with self._lock:
-            self._pending = (int(stream_id), fused)
+            superseded, self._pending = self._pending, (int(stream_id), fused)
+        if superseded is not None:
+            self._mark_finished(superseded[0])
         self._wake.set()
 
     def stop_and_flush(self) -> None:
@@ -137,7 +140,9 @@ class PlaybackWorker:
         it for the remainder of a write would freeze the UI.
         """
         with self._lock:
-            self._pending = None
+            dropped, self._pending = self._pending, None
+        if dropped is not None:
+            self._mark_finished(dropped[0])
         self._interrupt.set()
         self._wake.set()
 
@@ -151,6 +156,24 @@ class PlaybackWorker:
     @property
     def current_stream_id(self) -> int | None:
         return self._current_stream_id
+
+    @property
+    def finished_stream_ids(self) -> frozenset[int]:
+        """Ids of streams playback is done with (ended, interrupted, superseded).
+
+        Every one of those resets ``played_samples``, which then looks exactly
+        like "not started yet". The Speak-state reader keys its zero-padded tail
+        drain on this set, so stream completion must stay observable after the
+        clock resets.
+        """
+        with self._lock:
+            return frozenset(self._finished_stream_ids)
+
+    def _mark_finished(self, stream_id: int) -> None:
+        with self._lock:
+            self._finished_stream_ids.add(int(stream_id))
+            if len(self._finished_stream_ids) > 128:
+                self._finished_stream_ids = set(sorted(self._finished_stream_ids)[-64:])
 
     @property
     def failures(self) -> int:
@@ -225,6 +248,7 @@ class PlaybackWorker:
         finally:
             self._current_stream_id = None
             self._played = 0
+            self._mark_finished(stream_id)
             if stream is not None:
                 try:
                     stream.close()

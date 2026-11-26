@@ -63,6 +63,32 @@ def _wait_until(predicate, timeout: float = 5.0) -> bool:
     return False
 
 
+def test_a_finished_or_superseded_stream_is_marked_so_consumers_can_drain() -> None:
+    """Stream completion must be observable after the clock resets.
+
+    The Speak-state reader keys its tail drain on stream identity: when
+    playback is done with a stream (played to the end, interrupted, or
+    superseded before it started), the reader must be able to tell. The
+    ``played_samples`` reset to 0 at end-of-stream cannot express that.
+    """
+    factory = _Factory()
+    worker = PlaybackWorker(RATE, stream_factory=factory)
+
+    worker._play_stream(7, np.zeros(RATE, dtype=np.float32))
+    assert 7 in worker.finished_stream_ids, "a stream that played to the end must be marked"
+
+    worker.play(8, np.zeros(RATE, dtype=np.float32))
+    worker.play(9, np.zeros(RATE, dtype=np.float32))  # supersedes the pending 8
+    assert 8 in worker.finished_stream_ids, (
+        "a pending stream superseded in the queue must be marked"
+    )
+
+    worker.stop_and_flush()  # drops the pending 9
+    assert 9 in worker.finished_stream_ids, (
+        "a pending stream dropped by an interrupt must be marked"
+    )
+
+
 def test_playback_writes_in_chunks_at_the_stream_rate() -> None:
     """Writes must be chunked, not one blocking write for the whole utterance."""
     factory = _Factory()

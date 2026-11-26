@@ -54,6 +54,56 @@ def _wait_until(predicate, timeout: float = 5.0) -> bool:
     return False
 
 
+def test_speak_response_feeds_motion_and_playback_the_same_stream_id(window, monkeypatch) -> None:
+    """The Speak-state clock and playback must agree on stream identity.
+
+    The motion engine tells "still playing" from "played out" by matching its
+    utterance id against the playback worker's published stream ids. If the two
+    sides numbered streams independently, every id comparison would compare
+    unrelated counters and the zero-padded tail drain could never fire.
+    """
+    import numpy as np
+
+    fed_ids: list[int | None] = []
+    played_ids: list[int] = []
+
+    class _TTS:
+        is_loaded = True
+
+        def synthesize(self, _text: str):
+            return np.zeros(2, dtype=np.float32)
+
+        def cleanup(self):
+            pass
+
+    class _Motion:
+        def process_tts_audio(self, _audio, sample_rate=None, stream_id=None):
+            fed_ids.append(stream_id)
+
+        def cleanup(self):
+            pass
+
+    class _Playback:
+        def play(self, stream_id, _audio):
+            played_ids.append(stream_id)
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(window, "tts_engine", _TTS())
+    monkeypatch.setattr(window, "motion_model", _Motion())
+    monkeypatch.setattr(window, "_playback", _Playback())
+
+    window._speak_response("hello")
+    window._speak_response("world")
+
+    assert fed_ids == played_ids, (
+        f"motion got stream ids {fed_ids} while playback got {played_ids}; "
+        f"both clocks must be keyed by the same id"
+    )
+    assert len(set(played_ids)) == 2, "consecutive utterances must get distinct ids"
+
+
 def test_a_replacement_generation_is_not_cancelled_by_the_previous_cancel(
     window, monkeypatch
 ) -> None:

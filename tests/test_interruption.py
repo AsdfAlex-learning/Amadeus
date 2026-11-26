@@ -159,7 +159,10 @@ def test_supersede_speech_drops_the_active_utterance(config: dict) -> None:
         played_samples = 0
 
     engine.attach_playback(_Idle(), playback_rate=int(config["tts"]["sample_rate"]))
-    engine.process_tts_audio(np.zeros(16000, dtype=np.float32))
+    # Long enough that the lookahead gate leaves part of it unperformed: a
+    # sub-chunk utterance is zero-padded and performed in full immediately, so
+    # it would no longer be active by the time this test looks.
+    engine.process_tts_audio(np.zeros(int(2.5 * 16000), dtype=np.float32), sample_rate=16000)
     assert engine.speech_active
 
     engine.supersede_speech()
