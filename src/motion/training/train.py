@@ -198,7 +198,12 @@ def train(
     # L3 fix: track best validation loss for early stopping.
     best_val_loss = float("inf")
     patience_counter = 0
+    # The resume cursor is "last completed epoch": start_epoch = stored + 1.
+    # Storing num_epochs here instead silently discards the remaining schedule
+    # when an early-stopped run is resumed.
+    last_completed_epoch = start_epoch - 1
     for epoch in range(start_epoch, num_epochs):
+        last_completed_epoch = epoch
         total_loss = 0.0
         optimizer.zero_grad()
         for batch_idx, batch in enumerate(dataloader):
@@ -361,7 +366,7 @@ def train(
             scheduler=scheduler,
             scaler=scaler,
             ema=ema,
-            epoch=num_epochs,
+            epoch=last_completed_epoch,
             config={
                 "num_params": num_params,
                 "hidden_dim": hidden_dim,

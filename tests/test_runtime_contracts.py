@@ -188,6 +188,9 @@ _TINY_TRAIN_KWARGS = dict(
     use_amp=False,
     val_split=0.0,
     num_epochs=1,
+    # With the default of 4 the 1-sample dataset never fills an accumulation
+    # group, so a run would complete without a single optimizer step.
+    grad_accum_steps=1,
 )
 
 
@@ -214,6 +217,36 @@ def test_training_resumes_from_a_full_snapshot(
         output_dir=tmp_path / "run2",
         resume_from=str(checkpoint),
         **_TINY_TRAIN_KWARGS,
+    )
+
+
+def test_the_final_snapshot_records_the_last_completed_epoch(
+    tiny_preprocessed_dataset: Path, tmp_path: Path
+) -> None:
+    """Resuming must continue the schedule, not skip past its end.
+
+    The snapshot's ``epoch`` is the resume cursor (``start_epoch = epoch + 1``).
+    Recording ``num_epochs`` instead of the last completed epoch makes a
+    resumed early-stopped run start past the end of the schedule - silently
+    discarding every remaining epoch - and makes extending a finished run skip
+    one epoch.
+    """
+    import torch
+
+    from src.motion.training.train import train
+
+    run = tmp_path / "run"
+    train(
+        data_dir=tiny_preprocessed_dataset,
+        output_dir=run,
+        **{**_TINY_TRAIN_KWARGS, "num_epochs": 2},
+    )
+
+    checkpoint = run / "full_duplex_dit.pt"
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    assert payload["epoch"] == 1, (
+        f"the final snapshot claims epoch {payload['epoch']}; a 2-epoch run completed "
+        f"epochs 0..1 and resume must start at 2, not past the end of the schedule"
     )
 
 
