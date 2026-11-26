@@ -301,7 +301,7 @@ class AmadeusWindow(QMainWindow):
                 and full_response.strip()
                 and not self._is_generation_cancelled(generation_id)
             ):
-                self._speak_response(full_response)
+                self._speak_response(full_response, generation_id)
 
     def _append_response(self, text: str):
         cursor = self.conversation_display.textCursor()
@@ -322,10 +322,17 @@ class AmadeusWindow(QMainWindow):
         state_label = "● 聆听中..." if self.audio_pipeline.state != PipelineState.IDLE else "● 就绪"
         self.status_label.setText(state_label)
 
-    def _speak_response(self, text: str):
+    def _speak_response(self, text: str, generation_id: int | None = None):
         try:
             audio_data = self.tts_engine.synthesize(text)
             if audio_data is None or len(audio_data) == 0:
+                return
+            if generation_id is not None and self._is_generation_cancelled(generation_id):
+                # Synthesis takes hundreds of milliseconds to seconds. An
+                # interrupt (or shutdown) landing in that window has already
+                # flushed playback and cancelled this generation; feeding the
+                # motion engine and play() now would re-arm exactly the audio
+                # the user just interrupted.
                 return
             # One id for both clocks: the motion engine tracks its utterance by
             # this id and tells "still playing" from "played out" by matching it

@@ -11,6 +11,7 @@ still seconds away.
 
 from __future__ import annotations
 
+import threading
 import time
 
 import numpy as np
@@ -168,3 +169,69 @@ def test_supersede_speech_drops_the_active_utterance(config: dict) -> None:
     engine.supersede_speech()
     assert not engine.speech_active, "the utterance survived interference"
     assert engine._tts_pending.peek() is None
+
+
+def test_an_interrupt_landing_during_synthesize_does_not_rearm_playback(window, monkeypatch) -> None:
+    """The cancel window between the pre-check and play() must be closed.
+
+    ``tts_engine.synthesize`` takes hundreds of milliseconds to seconds. If a
+    VAD onset interrupts during it - flushing playback and cancelling the
+    generation - the cancelled reply must not go on to feed the motion engine
+    and ``play()`` afterwards: that re-arms exactly the audio the user just
+    interrupted, and the onset fires only once per utterance.
+    """
+    release = threading.Event()
+    entered = threading.Event()
+    played: list[int] = []
+    fed: list[int] = []
+
+    class _BlockingTTS:
+        is_loaded = True
+
+        def synthesize(self, _text: str):
+            entered.set()
+            release.wait(timeout=5)
+            return np.zeros(4, dtype=np.float32)
+
+        def cleanup(self):
+            pass
+
+    class _Motion:
+        def process_tts_audio(self, _audio, sample_rate=None, stream_id=None):
+            fed.append(stream_id)
+
+        def supersede_speech(self):
+            pass
+
+        def set_text_prompt(self, _text):
+            pass
+
+        def cleanup(self):
+            pass
+
+    class _Playback:
+        def play(self, stream_id, _audio):
+            played.append(stream_id)
+
+        def stop_and_flush(self):
+            pass
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(window, "tts_engine", _BlockingTTS())
+    monkeypatch.setattr(window, "motion_model", _Motion())
+    monkeypatch.setattr(window, "_playback", _Playback())
+    monkeypatch.setattr(window.dialogue_model, "generate", lambda _m, **_k: iter(["ok."]))
+
+    window._handle_text("hello")
+    assert _wait_until(entered.is_set), "the reply never reached synthesis"
+
+    window._interrupt_speech()
+    release.set()
+    assert _wait_until(
+        lambda: window._generation_thread is None or not window._generation_thread.is_alive()
+    )
+
+    assert fed == [], "an interrupted reply re-fed the motion engine after synthesize"
+    assert played == [], "an interrupted reply re-armed playback after synthesize"
