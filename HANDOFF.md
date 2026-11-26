@@ -1,5 +1,7 @@
 # Handoff — Amadeus C-7 改道：Dialogue API 化改造（2026-10-12，终态）
 
+> **⚠️ 已过时（superseded，2026-11-26）**: 本文描述的 `fix/runtime-p0` 已合并进 main（PR #1，merge commit `db04bae`）并删除。§5"剩余工作"与 §2/§3 的状态描述已成历史：basedpyright 现为 0 errors 且是硬门禁；文档已随 PR 入库；SilencePromptGenerator 与 Phase-0 基线已实现（`5aac7c4`）。当前事实以 `docs/RUNTIME_FIX_REPORT.md` 为准。本文仅作历史记录保留。
+
 **Repo:** `D:\Whoami\Amadeus`（GitHub: `AsdfAlex-learning/Amadeus`）
 **Branch:** `fix/runtime-p0` — **已推送**（origin/fix/runtime-p0，共 48 commits，HEAD `c7e37d3`）
 **PR 入口:** https://github.com/AsdfAlex-learning/Amadeus/pull/new/fix/runtime-p0

@@ -584,3 +584,122 @@ def test_legacy_resampling_does_not_starve_the_audio(tmp_path: Path) -> None:
     assert float(torch.count_nonzero(item["motion"])) > 0, "the motion chunk is all zeros"
     assert tuple(item["motion"].shape) == (50, 45)
     assert item["user_audio"].shape[0] == sr
+
+
+# ── training ergonomics: warmup=0 and reproducibility ────────────────────────
+
+
+def test_zero_warmup_steps_disables_warmup(
+    tiny_preprocessed_dataset: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """The CLI promises "(0=disable)", but a zero-length LinearLR still ramps.
+
+    Its start factor of 0.01 means the first optimizer steps train at one
+    hundredth of the requested learning rate - "disabled" warmup silently
+    changed the optimization.
+    """
+    import torch
+
+    from src.motion.training.train import train
+
+    seen: list[float] = []
+    original_step = torch.optim.AdamW.step
+
+    def lr_probe(self, *args, **kwargs):
+        seen.append(self.param_groups[0]["lr"])
+        return original_step(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim.AdamW, "step", lr_probe)
+
+    train(
+        data_dir=tiny_preprocessed_dataset,
+        output_dir=tmp_path / "run",
+        **{**_TINY_TRAIN_KWARGS, "warmup_steps": 0, "learning_rate": 1e-4},
+    )
+    assert seen, "no optimizer step ran"
+    assert seen[0] == pytest.approx(1e-4, rel=0.05), (
+        f"the first step used lr {seen[0]:.2e} instead of the requested 1e-4: "
+        f"warmup_steps=0 did not disable warmup"
+    )
+
+
+def test_two_runs_with_the_same_settings_produce_identical_weights(
+    tiny_preprocessed_dataset: Path, tmp_path: Path
+) -> None:
+    """M-20: an unseeded run can never be reproduced or compared.
+
+    Model init, the train/val split, the chunk sampler and the diffusion
+    timesteps all draw from global RNG state; without a seed, the same command
+    twice gives two different models.
+    """
+    import torch
+
+    from src.motion.training.train import train
+
+    for name in ("a", "b"):
+        train(
+            data_dir=tiny_preprocessed_dataset,
+            output_dir=tmp_path / name,
+            **{**_TINY_TRAIN_KWARGS, "num_epochs": 1},
+        )
+
+    first = torch.load(
+        tmp_path / "a" / "full_duplex_dit.pt", map_location="cpu", weights_only=False
+    )
+    second = torch.load(
+        tmp_path / "b" / "full_duplex_dit.pt", map_location="cpu", weights_only=False
+    )
+    for key, tensor in first["model"].items():
+        assert torch.equal(tensor, second["model"][key]), (
+            f"weight {key!r} differs between two identical runs; training is not reproducible"
+        )
+
+
+def test_motion_comparison_resamples_ground_truth_to_the_comparison_rate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Ground truth is extracted at preprocess fps; predictions live at 50 Hz.
+
+    The comparison subcommand plotted raw npz rows on the --fps axis (default
+    50), compressing 25 fps ground truth 2x in time - every overlay was
+    misaligned.
+    """
+    import sys
+
+    import src.motion.training.visualize as visualize
+
+    gt_npz = tmp_path / "gt.npz"
+    np.savez(
+        gt_npz,
+        live2d_params=np.zeros((50, 45), dtype=np.float32),
+        fps=np.float32(25.0),
+    )
+    pred_npy = tmp_path / "pred.npy"
+    np.save(pred_npy, np.zeros((100, 45), dtype=np.float32))
+
+    captured = {}
+    monkeypatch.setattr(
+        visualize,
+        "plot_motion_comparison",
+        lambda gt, pred, out, fps=50: captured.update(gt=gt, pred=pred, fps=fps),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "visualize",
+            "motion",
+            "--gt_npz",
+            str(gt_npz),
+            "--pred_npy",
+            str(pred_npy),
+            "--out",
+            str(tmp_path / "out.png"),
+        ],
+    )
+    visualize.main()
+
+    assert captured["gt"].shape == (100, 45), (
+        f"ground truth reached the comparison as {captured['gt'].shape}; 50 rows "
+        f"at 25 fps must be resampled to 100 rows at the 50 Hz comparison rate"
+    )

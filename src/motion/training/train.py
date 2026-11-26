@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 from loguru import logger
@@ -35,6 +36,9 @@ def train(
     #: Render a model-motion GIF every N epochs into ``output_dir/samples``
     #: (0 = off). Fixed noise/timestep, so GIFs show progress on the same clip.
     sample_every: int = 0,
+    #: Seed for torch/numpy and the train/val split, so a run is reproducible
+    #: (M-20). ``None`` runs unseeded.
+    seed: int | None = 42,
     # ── LoRA ──
     use_lora: bool = False,
     lora_rank: int = 8,
@@ -44,6 +48,12 @@ def train(
 ):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if seed is not None:
+        # M-20: model init, the split, the chunk sampler and the diffusion
+        # timesteps all draw from global RNG state.
+        torch.manual_seed(seed)
+        np.random.seed(seed)
 
     if device == "auto":
         if torch.cuda.is_available():
@@ -70,7 +80,10 @@ def train(
     # Train/val split
     val_size = max(1, int(len(full_dataset) * val_split)) if val_split > 0 else 0
     train_size = len(full_dataset) - val_size
-    train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
+    split_generator = torch.Generator().manual_seed(seed) if seed is not None else None
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        full_dataset, [train_size, val_size], generator=split_generator
+    )
     logger.info(f"Dataset: {train_size} train / {val_size} val samples")
 
     dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
@@ -93,6 +106,9 @@ def train(
         resume_path = Path(resume_from)
         if resume_path.exists():
             state = torch.load(resume_path, map_location=device, weights_only=False)
+            # ^ weights_only=False: the snapshot is a trusted local artifact
+            # (full state dict incl. optimizer); loading an untrusted .pt is
+            # arbitrary code execution.
             # L4 fix: support both legacy (raw state_dict) and new format
             # (dict with model / optimizer / scheduler / epoch).
             if isinstance(state, dict) and "model" in state:
@@ -148,16 +164,22 @@ def train(
     # cosine-anneals over the remaining epochs.
     steps_per_epoch = max(1, len(dataloader) // max(grad_accum_steps, 1))
     total_steps = max(1, num_epochs * steps_per_epoch)
-    warmup_steps = min(warmup_steps, max(1, total_steps - 1))
-    warmup = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
-    )
-    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(1, total_steps - warmup_steps)
-    )
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
-    )
+    if warmup_steps > 0:
+        warmup_steps = min(warmup_steps, max(1, total_steps - 1))
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
+        )
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(1, total_steps - warmup_steps)
+        )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
+        )
+    else:
+        # 0 = disable. A zero-length LinearLR still ramps from its start factor
+        # (0.01), silently training the first steps at 1% of the requested LR.
+        # With no warmup the cosine decays straight from the base LR.
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, total_steps))
 
     # C-3 fix: the AMP scaler must exist *before* the resume block below, which
     # restores its state. It used to be constructed after that block, so any
@@ -524,6 +546,7 @@ if __name__ == "__main__":
         "--val_split", type=float, default=0.1, help="Validation split ratio (0=no validation)"
     )
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint path")
+    parser.add_argument("--seed", type=int, default=42, help="RNG seed for reproducibility")
     parser.add_argument(
         "--weight_decay",
         type=float,
@@ -586,6 +609,7 @@ if __name__ == "__main__":
         resume_from=args.resume,
         weight_decay=args.weight_decay,
         warmup_steps=args.warmup_steps,
+        seed=args.seed,
         early_stopping_patience=args.early_stopping_patience,
         ema_decay=args.ema_decay,
         use_lora=args.use_lora,

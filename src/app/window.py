@@ -203,7 +203,7 @@ class AmadeusWindow(QMainWindow):
                 last_user_text=last_user,
                 last_assistant_text=last_assistant,
                 perception=self.camera.latest_perception(),
-                character_emotion=getattr(self.dialogue_model, "last_emotion", None),
+                character_emotion=None,  # the dialogue API client extracts no emotion (yet)
             )
         )
         if prompt:

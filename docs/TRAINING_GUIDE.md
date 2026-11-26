@@ -86,7 +86,7 @@ data/preprocessed/hdtf_subset/
 
 ```bash
 # 处理单个视频
-python -m src.motion.preprocess.pipeline --input video.mp4 --output data/preprocessed/
+python -m src.motion.preprocess.pipeline video.mp4 --output_dir data/preprocessed/
 
 # 批量处理目录(会自动跳过已处理的)
 python -m src.motion.preprocess.pipeline data/raw/hdtf/clips/clips/ --output_dir data/preprocessed/hdtf_full/
@@ -135,17 +135,22 @@ python -m src.motion.training.train ^
 
 ### 3.3 参数说明
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--num_epochs` | 200 | 总训练轮数 |
-| `--batch_size` | 1 | 单 GPU 8GB 显存建议保持 1 |
-| `--grad_accum` | 4 | 梯度累积步数,等效 batch size = 4 |
-| `--lr` | 1e-4 | 学习率 |
-| `--weight_decay` | 0.01 | L2 正则化 |
-| `--warmup_steps` | 200 | 线性 warmup 步数 |
-| `--ema_decay` | 0.999 | EMA 衰减率(0=禁用) |
-| `--early_stopping_patience` | 50 | 验证 loss 连续 N 轮不下降则停止(0=禁用) |
-| `--val_split` | 0.1 | 验证集比例 |
+| 参数 | 所属 CLI | 默认值 | 说明 |
+|------|----------|--------|------|
+| `--num_epochs` | train_base | 200 | 总训练轮数（模块 CLI 同义参数为 `--epochs`） |
+| `--epochs` | 模块 CLI | 100 | 总训练轮数（train_base 同义参数为 `--num_epochs`） |
+| `--batch_size` | 两者 | 1 | 单 GPU 8GB 显存建议保持 1 |
+| `--grad_accum_steps` | train_base | 4 | 梯度累积步数,等效 batch size = 4 |
+| `--grad_accum` | 模块 CLI | 4 | 同上 |
+| `--learning_rate` | train_base | 1e-4 | 学习率 |
+| `--lr` | 模块 CLI | 1e-4 | 同上 |
+| `--weight_decay` | 两者 | 0.01 | L2 正则化 |
+| `--warmup_steps` | 两者 | 200 / 100 | 线性 warmup 步数（0=禁用） |
+| `--ema_decay` | 两者 | 0.999 / 0 | EMA 衰减率（0=禁用） |
+| `--early_stopping_patience` | 两者 | 30 / 0 | 验证 loss 连续 N 轮不下降则停止（0=禁用） |
+| `--val_split` | 两者 | 0.1 | 验证集比例 |
+
+> 两个 CLI 的参数名与部分默认值并不相同（如 `--epochs` 与 `--num_epochs`）；"默认值"列格式为 `train_base / 模块 CLI`，只有一个值时两者一致。以各自 `--help` 为准。
 
 ### 3.4 恢复训练
 
@@ -304,7 +309,7 @@ set HF_ENDPOINT=https://hf-mirror.com
 - 检查 `--lr` 是否太低(建议 1e-4)
 - 检查 `--warmup_steps` 是否太长(建议 200)
 - 检查 `--ema_decay` 是否开启(0.999 需要 100+ epoch 才见效)
-- 检查数据预处理是否成功(运行 `python -m src.motion.preprocess.pipeline --input video.mp4 --output data/test/`)
+- 检查数据预处理是否成功(运行 `python -m src.motion.preprocess.pipeline video.mp4 --output_dir data/test/`)
 
 ### 6.4 验证 loss 远高于训练 loss
 

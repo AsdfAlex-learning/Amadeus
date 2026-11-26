@@ -174,11 +174,6 @@ preprocess:
     min_tracking_confidence: 0.5
   arkit_mapping:
     config_path: "src/motion/preprocess/mappings/default.yaml"
-  body_skeleton:
-    enabled: false
-    model_path: "models/yolov8n-pose.pt"
-    confidence: 0.25
-    num_live2d_params: 45
   pipeline:
     output_format: "npz"  # npz or hdf5
     save_metadata: true

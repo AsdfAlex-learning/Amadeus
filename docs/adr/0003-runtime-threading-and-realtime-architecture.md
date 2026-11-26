@@ -6,6 +6,10 @@
 > **Related**: `docs/PROJECT_REVIEW_REPORT.md` §C-1, §C-5, §C-6, §H-1, §H-2, §H-6, §H-8
 > **Review**: independent critique (Oracle, 2026-09-15) — see "Review history"
 
+## Status
+
+Accepted (implemented; merged via PR #1 on 2026-11-26)
+
 ## Review history
 
 This ADR was submitted to an independent reviewer before any implementation. The

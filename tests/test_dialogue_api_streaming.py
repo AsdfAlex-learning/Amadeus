@@ -651,3 +651,56 @@ def test_a_midline_stall_past_the_deadline_raises_out_of_band(monkeypatch):
         assert isinstance(result["error"], DialogueUnavailableError)
     finally:
         gate.set()
+
+
+# ------------------------------------------------------------- robustness nits
+
+
+def test_the_query_string_of_api_base_survives_into_the_request(monkeypatch):
+    """Gateways sometimes require query parameters on the base URL.
+
+    Concatenating the endpoint onto api_base glued it *onto the query*
+    (https://x/v1?token=abc/chat/completions) and the request target then
+    dropped the query entirely.
+    """
+    h = StreamHarness([DONE], make_config(api_base="https://x.invalid/v1?token=abc")).install(
+        monkeypatch
+    )
+    collect(h.model().generate([]))
+    assert h.url == "https://x.invalid/v1/chat/completions?token=abc", h.url
+
+
+def test_open_stream_sends_the_query_string_in_the_request_target(monkeypatch):
+    sent = {}
+
+    class _FakeConn:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def request(self, method, path, body=None, headers=None):
+            sent["path"] = path
+
+        def getresponse(self):
+            return FakeResp([DONE])
+
+        sock = None
+
+    monkeypatch.setattr(model_module.http_client, "HTTPSConnection", _FakeConn)
+    model_module._open_stream("https://x.invalid/v1/chat/completions?token=abc", {}, b"{}", 5.0)
+    assert sent["path"] == "/v1/chat/completions?token=abc", sent
+
+
+def test_an_endless_unparsed_sse_stream_fails_instead_of_growing_forever(monkeypatch):
+    """``data:`` lines without a blank separator accumulate into one payload.
+
+    A malformed (or hostile) stream that never dispatches must fail out-of-band
+    rather than grow the accumulator without bound and then end cleanly.
+    """
+    script = [b"data: {unterminated\n"] * 200
+    h = StreamHarness(script).install(monkeypatch)
+    result = _drain_with_watchdog(h.model().generate([]), timeout=5.0)
+    assert result["status"] == "raised", (
+        f"200 unterminated data lines ended as {result['status']}; the stream is "
+        f"malformed and must fail out-of-band"
+    )
+    assert isinstance(result["error"], DialogueUnavailableError)

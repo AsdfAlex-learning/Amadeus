@@ -40,6 +40,8 @@ _STREAM_POLL_S = 0.25
 _BOUNDARY_CHARS = frozenset(" \t\n\r.,!?;:，。！？；：、…—\"'”’)）]】")
 
 _TEXT, _DONE, _ERROR = 0, 1, 2
+#: Cap for the multi-line `data:` accumulator; beyond this the stream is broken.
+_SSE_MAX_PENDING_LINES = 64
 _UNPARSED = object()
 
 
@@ -58,7 +60,10 @@ def _open_stream(url: str, headers: dict, body: bytes, timeout: float):
         http_client.HTTPSConnection if parsed.scheme == "https" else http_client.HTTPConnection
     )
     conn = conn_cls(parsed.netloc, timeout=timeout)
-    conn.request("POST", parsed.path or "/", body=body, headers=headers)
+    target = parsed.path or "/"
+    if parsed.query:
+        target += "?" + parsed.query
+    conn.request("POST", target, body=body, headers=headers)
     resp = conn.getresponse()
     return resp, conn
 
@@ -213,9 +218,22 @@ class DialogueModel:
 
     # ------------------------------------------------------------------ request
 
+    def _endpoint_url(self, suffix: str) -> str:
+        """Append *suffix* to api_base's path, preserving any query string.
+
+        Gateways sometimes require query parameters on the base URL; string
+        concatenation glued the endpoint onto the query
+        (https://x/v1?token=abc/chat/completions) and the request target then
+        dropped the query entirely.
+        """
+        parsed = urlparse(self.api_base)
+        path = (parsed.path or "").rstrip("/") + suffix
+        query = f"?{parsed.query}" if parsed.query else ""
+        return f"{parsed.scheme}://{parsed.netloc}{path}{query}"
+
     def _build_request(self, messages: list[dict[str, str]]):
         if self.provider == "openai":
-            url = self.api_base + "/chat/completions"
+            url = self._endpoint_url("/chat/completions")
             # repetition_penalty is intentionally absent: it is not part of the
             # OpenAI API and strict implementations reject unknown fields (D7).
             body = {
@@ -227,7 +245,7 @@ class DialogueModel:
                 "top_p": self.top_p,
             }
         else:
-            url = self.api_base + "/api/chat"
+            url = self._endpoint_url("/api/chat")
             body = {
                 "model": self.model,
                 "messages": messages,
@@ -292,6 +310,11 @@ class DialogueModel:
         try:
             obj = json.loads(candidate)
         except ValueError:
+            if len(pending) >= _SSE_MAX_PENDING_LINES:
+                # A malformed or hostile stream of `data:` lines with no blank
+                # separator would otherwise accumulate forever and then end as
+                # a clean, empty reply.
+                raise ValueError("SSE data field never terminated into a JSON payload")
             pending.append(payload)
             return _UNPARSED
         pending.clear()
