@@ -143,13 +143,6 @@ class TTSEngine:
         declared rate. (C-5)
         """
         return np.zeros(int(duration * self.sample_rate), dtype=np.float32)
-        """Silence at *this engine's* advertised rate.
-
-        Hardcoding 16000 while advertising ``sample_rate`` (22050) made the
-        fallback the wrong duration as soon as anything downstream trusted the
-        declared rate. (C-5)
-        """
-        return np.zeros(int(duration * self.sample_rate), dtype=np.float32)
 
     @property
     def is_loaded(self) -> bool:

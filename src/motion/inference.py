@@ -353,7 +353,8 @@ class DiffusionMotionInference:
 
         Once running, ``process_user_audio`` and ``process_tts_audio`` only
         publish, and this thread becomes the sole mutator of the model and of
-        ``_audio_buffer`` / ``_tts_buffer``.
+        ``_audio_buffer`` / ``_tts_buffer`` - bar ``supersede_speech``, the one
+        deliberate exception (see its docstring).
         """
         if self._motion_worker is not None and self._motion_worker.is_alive():
             return
@@ -568,6 +569,11 @@ class DiffusionMotionInference:
         The engine then falls back to Listen/Silence rather than continuing to
         perform audio the user has stopped hearing. The next utterance is picked
         up from the pending slot as usual.
+
+        This is the one mutation allowed from outside the owner thread: the
+        capture-drain thread calls it on VAD onset. It only clears the
+        ``_speech`` / ``_tts_pending`` slots, which the owner thread re-checks
+        every tick, so no lock is needed (ADR 0003).
         """
         self._speech = None
         self._speech_inferred = 0
