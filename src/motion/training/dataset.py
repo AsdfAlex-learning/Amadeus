@@ -173,13 +173,23 @@ class MotionDataset(Dataset):
         # the motion array with `chunk_samples` (16 000) frames, which is
         # nonsense for motion that lives at 25–50 Hz. Resample motion to
         # the model's 50 Hz rate first, then chunk normally.
-        if motion.ndim == 2 and motion.shape[0] > len(audio):
+        #
+        # Sample-aligned means roughly one row per audio sample at
+        # `sample_rate`. The old guard only fired for motion *longer* than the
+        # audio (`>`), so the canonical equal-length layout was chunked raw:
+        # 16 000 audio samples paired with 50 motion rows.
+        if motion.ndim == 2 and motion.shape[0] * 2 > len(audio):
             motion = self._resample_motion(
-                motion, src_fps=self.sample_rate, dst_fps=float(self.AUDIO_FEATURES_PER_SEC)
+                motion, src_fps=float(self.sample_rate), dst_fps=float(self.AUDIO_FEATURES_PER_SEC)
             )
-        min_len = min(len(audio), len(motion))
-        audio = audio[:min_len]
-        motion = motion[:min_len]
+        # Truncate in TIME units. `min(len(audio), len(motion))` compared
+        # sample_rate samples against 50 Hz rows and cut the audio to 1/320 of
+        # the clip whenever the resample had run, leaving max_chunks == 0 and
+        # an all-zero dummy sample.
+        max_motion_rows = int(len(audio) * self.AUDIO_FEATURES_PER_SEC / self.sample_rate)
+        motion = motion[:max_motion_rows]
+        max_audio_samples = int(len(motion) * self.sample_rate / self.AUDIO_FEATURES_PER_SEC)
+        audio = audio[:max_audio_samples]
         T_audio_chunks = len(audio) // self.chunk_samples
         T_motion_chunks = len(motion) // self.chunk_motion_frames
         max_chunks = min(T_audio_chunks, T_motion_chunks)

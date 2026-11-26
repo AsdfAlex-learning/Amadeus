@@ -518,3 +518,71 @@ def test_the_heuristic_fallback_categories_match_the_real_parameter_order() -> N
     assert sorted(engine._mouth_indices) == [14, 15]
     assert sorted(engine._head_indices) == [0, 1, 2, 3, 4, 5]
     assert sorted(engine._eye_indices) == [6, 7, 8, 9, 10, 11, 12, 13]
+
+
+# ── legacy dataset path: audio and motion must share the time axis ───────────
+
+
+def test_legacy_sample_aligned_motion_is_resampled_before_chunking(tmp_path: Path) -> None:
+    """The legacy layout is one motion row per audio sample at 16 kHz.
+
+    Without normalizing onto the model's 50 Hz axis, chunking pairs 16 000
+    audio samples with 50 motion rows - one second of speech against 3 ms of
+    motion, the exact unit mixing the L5 comment claims to fix. The resample
+    guard fired only when the motion array was *longer* than the audio, so the
+    canonical equal-length layout never triggered it.
+    """
+    import soundfile as sf
+
+    from src.motion.training.dataset import MotionDataset
+
+    sr = 16_000
+    audio = np.linspace(0.0, 1.0, sr, dtype=np.float32)  # exactly 1 s
+    motion = np.linspace(0.0, 1.0, sr * 45, dtype=np.float32).reshape(sr, 45)
+    sf.write(tmp_path / "clip.wav", audio, sr)
+    np.save(tmp_path / "clip.npy", motion)
+
+    dataset = MotionDataset(tmp_path, dataset_type="mead")
+    item = dataset[0]
+
+    assert tuple(item["motion"].shape) == (50, 45), (
+        f"one second of motion must arrive as 50 rows at the model rate, got "
+        f"{tuple(item['motion'].shape)}"
+    )
+    assert float(item["motion"][0, 0]) == pytest.approx(0.0, abs=0.05), (
+        "the chunk does not start at the beginning of the resampled clip"
+    )
+    assert float(item["motion"][-1, 0]) == pytest.approx(1.0, abs=0.05), (
+        "the chunk does not end at the end of the resampled clip: the motion "
+        "was not resampled and only its first 50 raw rows were used"
+    )
+
+
+def test_legacy_resampling_does_not_starve_the_audio(tmp_path: Path) -> None:
+    """Truncation must be in time units, not element counts.
+
+    When the resample guard fired, ``min(len(audio), len(motion))`` compared
+    16 kHz samples against 50 Hz rows and cut the audio to 1/320 of the clip:
+    ``max_chunks`` then hit 0 and the sample silently became all-zero dummies.
+    """
+    import soundfile as sf
+    import torch
+
+    from src.motion.training.dataset import MotionDataset
+
+    sr = 16_000
+    audio = np.full(sr * 2, 0.5, dtype=np.float32)  # 2 s, non-zero
+    motion = np.full((sr * 2 + 8_000, 45), 0.25, dtype=np.float32)  # longer than audio
+    sf.write(tmp_path / "clip.wav", audio, sr)
+    np.save(tmp_path / "clip.npy", motion)
+
+    dataset = MotionDataset(tmp_path, dataset_type="mead")
+    item = dataset[0]
+
+    assert float(torch.count_nonzero(item["user_audio"])) > 0, (
+        "the audio chunk is all zeros: element-count truncation cut the clip "
+        "to 1/320 and the sample degenerated into a dummy"
+    )
+    assert float(torch.count_nonzero(item["motion"])) > 0, "the motion chunk is all zeros"
+    assert tuple(item["motion"].shape) == (50, 45)
+    assert item["user_audio"].shape[0] == sr
