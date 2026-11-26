@@ -51,6 +51,7 @@ def main():
     parser.add_argument(
         "--sample_every", type=int, default=10, help="Save a sample GIF every N epochs (0=disable)"
     )
+    parser.add_argument("--seed", type=int, default=42, help="RNG seed for reproducibility")
     args = parser.parse_args()
 
     # Use the project's train() function for the heavy lifting.
@@ -115,6 +116,7 @@ def main():
         val_split=args.val_split,
         use_lora=args.use_lora,
         sample_every=args.sample_every,
+        seed=args.seed,
     )
     print(f"\nTotal training time: {(time.time() - t0) / 60:.1f} min")
 

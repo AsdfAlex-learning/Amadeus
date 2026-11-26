@@ -584,3 +584,70 @@ def test_legacy_resampling_does_not_starve_the_audio(tmp_path: Path) -> None:
     assert float(torch.count_nonzero(item["motion"])) > 0, "the motion chunk is all zeros"
     assert tuple(item["motion"].shape) == (50, 45)
     assert item["user_audio"].shape[0] == sr
+
+
+# ── training ergonomics: warmup=0 and reproducibility ────────────────────────
+
+
+def test_zero_warmup_steps_disables_warmup(
+    tiny_preprocessed_dataset: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """The CLI promises "(0=disable)", but a zero-length LinearLR still ramps.
+
+    Its start factor of 0.01 means the first optimizer steps train at one
+    hundredth of the requested learning rate - "disabled" warmup silently
+    changed the optimization.
+    """
+    import torch
+
+    from src.motion.training.train import train
+
+    seen: list[float] = []
+    original_step = torch.optim.AdamW.step
+
+    def lr_probe(self, *args, **kwargs):
+        seen.append(self.param_groups[0]["lr"])
+        return original_step(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim.AdamW, "step", lr_probe)
+
+    train(
+        data_dir=tiny_preprocessed_dataset,
+        output_dir=tmp_path / "run",
+        **{**_TINY_TRAIN_KWARGS, "warmup_steps": 0, "learning_rate": 1e-4},
+    )
+    assert seen, "no optimizer step ran"
+    assert seen[0] == pytest.approx(1e-4, rel=0.05), (
+        f"the first step used lr {seen[0]:.2e} instead of the requested 1e-4: "
+        f"warmup_steps=0 did not disable warmup"
+    )
+
+
+def test_two_runs_with_the_same_settings_produce_identical_weights(
+    tiny_preprocessed_dataset: Path, tmp_path: Path
+) -> None:
+    """M-20: an unseeded run can never be reproduced or compared.
+
+    Model init, the train/val split, the chunk sampler and the diffusion
+    timesteps all draw from global RNG state; without a seed, the same command
+    twice gives two different models.
+    """
+    import torch
+
+    from src.motion.training.train import train
+
+    for name in ("a", "b"):
+        train(
+            data_dir=tiny_preprocessed_dataset,
+            output_dir=tmp_path / name,
+            **{**_TINY_TRAIN_KWARGS, "num_epochs": 1},
+        )
+
+    first = torch.load(tmp_path / "a" / "full_duplex_dit.pt", map_location="cpu", weights_only=False)
+    second = torch.load(
+        tmp_path / "b" / "full_duplex_dit.pt", map_location="cpu", weights_only=False
+    )
+    for key, tensor in first["model"].items():
+        assert torch.equal(tensor, second["model"][key]), (
+            f"weight {key!r} differs between two identical runs; training is not reproducible"
+        )
