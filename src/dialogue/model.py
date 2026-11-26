@@ -162,6 +162,7 @@ class DialogueModel:
         reader.start()
         buf = ""
         last_flush = monotonic()
+        last_data = monotonic()
         try:
             while True:
                 if cancel_event is not None and cancel_event.is_set():
@@ -175,7 +176,17 @@ class DialogueModel:
                 try:
                     kind, payload = queue.get(timeout=_POLL_S)
                 except Empty:
+                    if monotonic() - last_data > self.request_timeout:
+                        # Both stall modes land here: a mid-line stall leaves the
+                        # reader blocked in readline(), between-line silence
+                        # leaves it looping in select(). Either way the stream
+                        # has stopped making progress; fail out-of-band instead
+                        # of holding the turn (and the socket) open forever.
+                        raise DialogueUnavailableError(
+                            f"对话服务流静默超时：{self.request_timeout:g} 秒内无任何数据"
+                        )
                     continue
+                last_data = monotonic()
                 if kind == _TEXT:
                     buf += payload
                     k = _last_boundary(buf)

@@ -581,3 +581,73 @@ def test_an_http_error_status_raises_instead_of_a_silent_empty_reply(monkeypatch
 def test_a_success_status_still_streams_normally(monkeypatch):
     h = StreamHarness([sse_line("ok"), b"\n", DONE], status=200).install(monkeypatch)
     assert "".join(collect(h.model().generate([]))) == "ok"
+
+
+# --------------------------------------------------------------- stall deadline
+
+
+def _drain_with_watchdog(gen, timeout: float = 3.0) -> dict:
+    """Drain ``gen`` on a daemon thread, bounding a generator that never returns.
+
+    ``collect`` cannot bound a generator that yields nothing: its timeout is
+    checked between ``next()`` calls, and a stalled stream keeps ``next()``
+    blocked forever.
+    """
+    result: dict = {"status": "stuck"}
+
+    def run() -> None:
+        try:
+            result["chunks"] = [chunk for chunk in gen]
+            result["status"] = "done"
+        except Exception as e:  # noqa: BLE001 - recorded for the assertions
+            result["status"] = "raised"
+            result["error"] = e
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout)
+    return result
+
+
+def test_between_line_silence_past_the_deadline_raises_out_of_band(monkeypatch):
+    """A stream that stops sending must fail, not hang the generation forever.
+
+    Between-line silence leaves the reader looping in select() with no deadline:
+    the generator then waits until something else cancels it, holding the
+    dialogue (and a socket) open indefinitely.
+    """
+    h = StreamHarness(
+        [sse_line("Hi."), b"\n", ("sleep", 5.0), DONE],
+        make_config(request_timeout_seconds=0.25),
+    ).install(monkeypatch)
+    result = _drain_with_watchdog(h.model().generate([{"role": "user", "content": "hi"}]))
+    assert result["status"] == "raised", (
+        f"the stream went silent for 5 s and the generator is {result['status']}; "
+        f"it must fail out-of-band instead of hanging the turn"
+    )
+    error = result["error"]
+    assert isinstance(error, DialogueUnavailableError)
+    assert "静默" in str(error) or "timeout" in str(error).lower()
+
+
+def test_a_midline_stall_past_the_deadline_raises_out_of_band(monkeypatch):
+    """A stall inside a line lands on the same deadline.
+
+    ``readline`` blocks until the rest of the line or the socket timeout; a
+    server that dies mid-line must surface out-of-band rather than leave the
+    turn unanswerable.
+    """
+    gate = threading.Event()
+    h = StreamHarness(
+        [sse_line("Hi."), b"\n", ("block", gate)],
+        make_config(request_timeout_seconds=0.25),
+    ).install(monkeypatch)
+    try:
+        result = _drain_with_watchdog(h.model().generate([{"role": "user", "content": "hi"}]))
+        assert result["status"] == "raised", (
+            f"the stream stalled mid-line and the generator is {result['status']}; "
+            f"it must fail out-of-band instead of hanging the turn"
+        )
+        assert isinstance(result["error"], DialogueUnavailableError)
+    finally:
+        gate.set()
