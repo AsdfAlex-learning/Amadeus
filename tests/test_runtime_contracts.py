@@ -643,7 +643,9 @@ def test_two_runs_with_the_same_settings_produce_identical_weights(
             **{**_TINY_TRAIN_KWARGS, "num_epochs": 1},
         )
 
-    first = torch.load(tmp_path / "a" / "full_duplex_dit.pt", map_location="cpu", weights_only=False)
+    first = torch.load(
+        tmp_path / "a" / "full_duplex_dit.pt", map_location="cpu", weights_only=False
+    )
     second = torch.load(
         tmp_path / "b" / "full_duplex_dit.pt", map_location="cpu", weights_only=False
     )
@@ -684,8 +686,16 @@ def test_motion_comparison_resamples_ground_truth_to_the_comparison_rate(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["visualize", "motion", "--gt_npz", str(gt_npz), "--pred_npy", str(pred_npy),
-         "--out", str(tmp_path / "out.png")],
+        [
+            "visualize",
+            "motion",
+            "--gt_npz",
+            str(gt_npz),
+            "--pred_npy",
+            str(pred_npy),
+            "--out",
+            str(tmp_path / "out.png"),
+        ],
     )
     visualize.main()
 

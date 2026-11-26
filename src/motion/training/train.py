@@ -179,9 +179,7 @@ def train(
         # 0 = disable. A zero-length LinearLR still ramps from its start factor
         # (0.01), silently training the first steps at 1% of the requested LR.
         # With no warmup the cosine decays straight from the base LR.
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=max(1, total_steps)
-        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, total_steps))
 
     # C-3 fix: the AMP scaler must exist *before* the resume block below, which
     # restores its state. It used to be constructed after that block, so any
