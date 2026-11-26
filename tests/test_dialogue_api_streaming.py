@@ -49,11 +49,18 @@ class FakeResp:
     ``ev`` or close; ``("sleep", s)`` delays; ``("error", exc)`` raises.
     Close of the paired conn aborts blocking reads. EOF returns ``b""``."""
 
-    def __init__(self, script):
+    def __init__(self, script, status: int = 200, error_body: bytes = b""):
+        self.status = status
+        self._error_body = error_body
         self._script = list(script)
         self._i = 0
         self.lines_read = 0
         self.closed = threading.Event()
+
+    def read(self, n: int = -1):
+        if n is None or n < 0:
+            return self._error_body
+        return self._error_body[:n]
 
     def readline(self):
         while True:
@@ -86,8 +93,8 @@ DONE = b"data: [DONE]\n"
 
 
 class StreamHarness:
-    def __init__(self, script, config=None):
-        self.resp = FakeResp(script)
+    def __init__(self, script, config=None, status: int = 200, error_body: bytes = b""):
+        self.resp = FakeResp(script, status=status, error_body=error_body)
         self.conn = FakeConn(on_close=self.resp.closed.set)
         self.calls = []
         self._config = config or make_config()
@@ -550,3 +557,27 @@ def test_ollama_url_join(monkeypatch):
     ).install(monkeypatch)
     collect(h.model().generate([]))
     assert h.url == "http://localhost:11434/api/chat"
+
+
+# ------------------------------------------------------------------ http status
+
+
+@pytest.mark.parametrize("status", [401, 429, 500])
+def test_an_http_error_status_raises_instead_of_a_silent_empty_reply(monkeypatch, status):
+    """Error statuses answer with plain JSON, not SSE.
+
+    The reader would ignore every non-``data:`` line and end with a clean
+    ``_DONE``: a bad key, a wrong model name, or a rate limit would each look
+    like a perfectly normal empty reply (ADR 0005 D8 wants the reason).
+    """
+    body = json.dumps({"error": {"message": "the service said no"}}).encode()
+    h = StreamHarness([body + b"\n", b"\n"], status=status, error_body=body).install(monkeypatch)
+    with pytest.raises(DialogueUnavailableError) as exc:
+        collect(h.model().generate([{"role": "user", "content": "hi"}]))
+    assert str(status) in str(exc.value), "the HTTP status must be part of the reason"
+    assert "the service said no" in str(exc.value), "the error body must be part of the reason"
+
+
+def test_a_success_status_still_streams_normally(monkeypatch):
+    h = StreamHarness([sse_line("ok"), b"\n", DONE], status=200).install(monkeypatch)
+    assert "".join(collect(h.model().generate([]))) == "ok"

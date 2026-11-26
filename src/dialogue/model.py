@@ -80,6 +80,15 @@ def _close_quietly(conn) -> None:
         pass
 
 
+def _error_snippet(resp) -> str:
+    """Best-effort body preview for an error status, never raising."""
+    try:
+        raw = resp.read(512)
+    except Exception:
+        return ""
+    return raw.decode("utf-8", errors="replace").strip()[:200]
+
+
 def _last_boundary(buf: str) -> int:
     for i in range(len(buf) - 1, -1, -1):
         if buf[i] in _BOUNDARY_CHARS:
@@ -132,6 +141,15 @@ class DialogueModel:
             resp, conn = _open_stream(url, headers, body, self.request_timeout)
         except Exception as e:
             raise DialogueUnavailableError(f"对话服务连接失败：{e}") from e
+
+        if getattr(resp, "status", 200) >= 400:
+            # An error status answers with a plain JSON body, not SSE. Without
+            # this check the reader ignores every non-`data:` line and ends with
+            # a clean _DONE - a bad key, a wrong model name, or a rate limit
+            # would each look like a perfectly normal empty reply (ADR 0005 D8).
+            snippet = _error_snippet(resp)
+            _close_quietly(conn)
+            raise DialogueUnavailableError(f"对话服务返回 HTTP {resp.status}：{snippet}")
 
         queue: Queue = Queue()
         stop = threading.Event()
