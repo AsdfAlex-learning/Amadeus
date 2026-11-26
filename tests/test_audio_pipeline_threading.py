@@ -150,3 +150,24 @@ def test_asr_worker_stops_on_cleanup(config: dict) -> None:
     pipeline.cleanup()
 
     assert not worker.is_alive(), "ASR worker outlived cleanup()"
+
+
+def test_a_start_stop_start_cycle_registers_the_capture_callback_once(config, monkeypatch) -> None:
+    """The dialogue toggle must not stack VAD consumers.
+
+    Every registered copy of ``_on_audio_chunk`` processes each chunk again:
+    the pre-speech buffer then records each sample N times and Whisper gets
+    echo-doubled, N-times-duration utterances.
+    """
+    pipeline, _ = _pipeline_with_stub(config)
+    monkeypatch.setattr(pipeline.capture, "start", lambda: None)
+    monkeypatch.setattr(pipeline.capture, "stop", lambda: None)
+
+    pipeline.start()
+    pipeline.stop()
+    pipeline.start()
+    try:
+        registered = pipeline.capture._callbacks.count(pipeline._on_audio_chunk)
+        assert registered == 1, f"the VAD consumer is registered {registered} times after a toggle cycle"
+    finally:
+        pipeline.cleanup()

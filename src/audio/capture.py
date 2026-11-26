@@ -94,8 +94,14 @@ class MicrophoneCapture:
         self._callbacks.clear()
 
     def on_audio(self, callback: Callable[[np.ndarray], None]):
-        """Register a consumer. Invoked on the drain worker, never on the callback."""
-        self._callbacks.append(callback)
+        """Register a consumer. Invoked on the drain worker, never on the callback.
+
+        Registration is idempotent per callable: a start/stop/start cycle (the
+        dialogue toggle) must not stack the same consumer, or every chunk is
+        processed once per registration.
+        """
+        if callback not in self._callbacks:
+            self._callbacks.append(callback)
 
     # ── real-time path ───────────────────────────────────────────────────────
 
