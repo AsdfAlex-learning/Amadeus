@@ -209,7 +209,10 @@ def motion_to_gif(
             v = float(np.clip(params[t, idx], 0.0, 1.0))
             x0 = int((i + 0.5) * bar_w)
             x1 = int((i + 1) * bar_w) - 2
-            y1 = int(H * (1 - v))
+            # Scale the bar inside the drawable region: with y1 = H*(1-v) any
+            # value below ~0.09 inverted the rectangle (top below bottom) and
+            # Pillow raises "y1 must be greater than or equal to y0".
+            y1 = int((H - 30) * (1 - v))
             # Simple bar via Pillow
             from PIL import ImageDraw
 

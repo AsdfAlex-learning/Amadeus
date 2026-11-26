@@ -315,6 +315,99 @@ def test_sample_every_renders_a_gif_per_interval(
     assert all(p.stat().st_size > 0 for p in samples), "a rendered sample GIF is empty"
 
 
+def test_an_early_stopped_run_returns_the_best_validation_weights_not_the_last(
+    tiny_preprocessed_dataset: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """An early-stopped run must save the best-val epoch's weights.
+
+    ``best_val_loss`` was tracked but nothing kept its weights: the final save
+    wrote whatever the loop happened to stop on, so a weekend run could return
+    a model worse than the best epoch it flew past - defeating the feature.
+    """
+    import soundfile as sf
+    import torch
+
+    from src.motion.training.train import train
+
+    # The 1-sample fixture cannot split; add a second clip for 1 train / 1 val.
+    rng = np.random.default_rng(1)
+    np.savez(
+        tiny_preprocessed_dataset / "sample2.npz",
+        live2d_params=rng.random((50, 45), dtype=np.float32),
+        blendshapes=rng.random((50, 52), dtype=np.float32),
+        head_angles=rng.random((50, 3), dtype=np.float32),
+        bad_frames=np.array([], dtype=np.int64),
+        fps=np.float32(25.0),
+        duration_sec=np.float32(2.0),
+        identity_id=np.int64(0),
+        source_video="synthetic",
+    )
+    sf.write(tiny_preprocessed_dataset / "sample2.wav", np.zeros(32_000, dtype=np.float32), 16_000)
+
+    # Val losses per epoch: 1.0 (best), 0.5 (best), 0.9 (patience fires).
+    scripted_vals = iter([1.0, 0.5, 0.9])
+
+    class _ScriptedLoss:
+        def __call__(self, pred, target):
+            value = 0.0 if torch.is_grad_enabled() else next(scripted_vals)
+            return (pred * 0).sum() + value
+
+    # Every optimizer step stamps the first parameter tensor with
+    # 100 + step_count, so the saved weights encode which epoch they are from.
+    original_step = torch.optim.AdamW.step
+    count = {"n": 0}
+
+    def stamping_step(self, *args, **kwargs):
+        result = original_step(self, *args, **kwargs)
+        count["n"] += 1
+        self.param_groups[0]["params"][0].data.fill_(100.0 + count["n"])
+        return result
+
+    monkeypatch.setattr(torch.nn, "MSELoss", lambda: _ScriptedLoss())
+    monkeypatch.setattr(torch.optim.AdamW, "step", stamping_step)
+
+    run = tmp_path / "run"
+    train(
+        data_dir=tiny_preprocessed_dataset,
+        output_dir=run,
+        **{
+            **_TINY_TRAIN_KWARGS,
+            "num_epochs": 5,
+            "val_split": 0.5,
+            "early_stopping_patience": 1,
+        },
+    )
+
+    payload = torch.load(run / "full_duplex_dit.pt", map_location="cpu", weights_only=False)
+    values = [t for t in payload["model"].values() if torch.is_tensor(t)]
+
+    def has_marker(value: float) -> bool:
+        return any(bool(torch.all(t == value)) for t in values)
+
+    assert has_marker(102.0), (
+        "the final snapshot does not carry the best-validation epoch's weights "
+        "(epoch 2 of the scripted 1.0/0.5/0.9 run)"
+    )
+    assert not has_marker(103.0), (
+        "the final snapshot carries the weights of the last epoch trained, not "
+        "the best-validation one: early stopping returned a worse model"
+    )
+
+
+def test_motion_to_gif_renders_low_parameter_values(tmp_path: Path) -> None:
+    """A bar for a small parameter value must render, not crash the GIF writer.
+
+    The bar rectangle was drawn as [x0, H*(1-v), x1, H-30]: any value below
+    about 0.09 put the top edge below the bottom edge, and Pillow raises
+    "y1 must be greater than or equal to y0".
+    """
+    from src.motion.training.visualize import motion_to_gif
+
+    out = tmp_path / "low.gif"
+    motion_to_gif(np.zeros((3, 45), dtype=np.float32), out)
+    assert out.exists() and out.stat().st_size > 0, "the GIF was not rendered"
+
+
 # ── C-8: persona performance parameters must reach the output ────────────────
 
 

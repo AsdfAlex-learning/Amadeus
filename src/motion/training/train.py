@@ -201,6 +201,11 @@ def train(
     # L3 fix: track best validation loss for early stopping.
     best_val_loss = float("inf")
     patience_counter = 0
+    # The final save must return the best-validation weights, not whatever the
+    # loop happened to stop on: an early-stopped weekend run would otherwise be
+    # worse than the best epoch it flew past.
+    best_model_state: dict | None = None
+    best_ema_state: dict | None = None
     # The resume cursor is "last completed epoch": start_epoch = stored + 1.
     # Storing num_epochs here instead silently discards the remaining schedule
     # when an early-stopped run is resumed.
@@ -313,11 +318,18 @@ def train(
         logger.info(log_msg)
 
         # L3: early stopping based on validation loss.
-        if val_loader is not None and early_stopping_patience > 0:
+        if val_loader is not None:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
-            else:
+                best_model_state = {
+                    k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                }
+                if ema is not None:
+                    best_ema_state = {
+                        k: v.detach().cpu().clone() for k, v in ema.state_dict().items()
+                    }
+            elif early_stopping_patience > 0:
                 patience_counter += 1
                 if patience_counter >= early_stopping_patience:
                     logger.info(
@@ -369,6 +381,11 @@ def train(
             )
 
     # Final save
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        if ema is not None and best_ema_state is not None:
+            ema.load_state_dict(best_ema_state)
+        logger.info(f"Restoring best-validation weights (val loss {best_val_loss:.6f})")
     if use_lora:
         final_lora_path = output_dir / "lora_adapter.pt"
         save_lora(model, final_lora_path)
