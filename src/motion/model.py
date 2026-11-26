@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
@@ -14,7 +16,7 @@ class HubertEncoder(nn.Module):
         self.model_name = model_name
         self._freeze = freeze
         self._loaded = False
-        self.hubert = None
+        self.hubert: Any = None
         self._try_load()
 
     def _try_load(self):
@@ -37,8 +39,10 @@ class HubertEncoder(nn.Module):
 
     def warmup(self, device: torch.device):
         if self._loaded and self.hubert is not None:
-            self.hubert = self.hubert.to(device)
-            dummy = torch.randn(1, 16000, device=device)
+            self.hubert = cast(Any, self.hubert).to(device)
+            parameter = next(self.hubert.parameters(), None)
+            dtype = parameter.dtype if parameter is not None else torch.float32
+            dummy = torch.randn(1, 16000, device=device, dtype=dtype)
             with torch.no_grad():
                 self.forward(dummy)
 
@@ -89,7 +93,9 @@ class VisualEncoder(nn.Module):
     def warmup(self, device: torch.device):
         if self._loaded and self.backbone is not None:
             self.backbone = self.backbone.to(device)
-            dummy = torch.randn(1, 3, 224, 224, device=device)
+            parameter = next(self.backbone.parameters(), None)
+            dtype = parameter.dtype if parameter is not None else torch.float32
+            dummy = torch.randn(1, 3, 224, 224, device=device, dtype=dtype)
             with torch.no_grad():
                 self.forward(dummy.unsqueeze(1))
 
@@ -122,8 +128,8 @@ class TextEncoder(nn.Module):
         self.model_name = model_name
         self._freeze = freeze
         self._loaded = False
-        self.bert = None
-        self.tokenizer = None
+        self.bert: Any = None
+        self.tokenizer: Any = None
         self._try_load()
         self.bert_dim = 128 if self._loaded else 256
         self.proj = nn.Linear(self.bert_dim, output_dim)
@@ -150,7 +156,7 @@ class TextEncoder(nn.Module):
 
     def warmup(self, device: torch.device):
         if self._loaded and self.bert is not None:
-            self.bert = self.bert.to(device)
+            self.bert = cast(Any, self.bert).to(device)
 
     def to_half(self):
         if self._loaded and self.bert is not None:
@@ -160,8 +166,16 @@ class TextEncoder(nn.Module):
 
     def forward(self, texts: list[str], device: torch.device) -> torch.Tensor:
         if not self._loaded or self.bert is None or self.tokenizer is None:
-            dummy = torch.zeros(len(texts), self.proj.in_features, device=device)
-            return self.proj(dummy.to(dummy.dtype))
+            # Match the projection's dtype: `dummy.to(dummy.dtype)` was a no-op,
+            # so a half-precision projection was fed float32 and the Linear raised
+            # a dtype mismatch.
+            dummy = torch.zeros(
+                len(texts),
+                self.proj.in_features,
+                device=device,
+                dtype=self.proj.weight.dtype,
+            )
+            return self.proj(dummy)
         with torch.set_grad_enabled(not self._freeze):
             tokens = self.tokenizer(
                 texts, return_tensors="pt", padding=True, truncation=True, max_length=64
@@ -195,7 +209,11 @@ class TimestepEmbedding(nn.Module):
         emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         if emb.shape[-1] < self.dim:
             emb = torch.nn.functional.pad(emb, (0, self.dim - emb.shape[-1]))
-        return self.mlp(emb)
+        # The sinusoidal features are computed in float32 for numerical accuracy,
+        # but the projection may have been converted to half precision by
+        # to_half(). Cast to the MLP's own dtype or the Linear raises
+        # "mat1 and mat2 must have the same dtype".
+        return self.mlp(emb.to(next(self.mlp.parameters()).dtype))
 
 
 class AdaLN(nn.Module):
@@ -267,7 +285,10 @@ class DiTBlock(nn.Module):
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.use_checkpoint and self.training:
-            return checkpoint.checkpoint(self._forward, x, c, cross_kv, mask, use_reentrant=False)
+            return cast(
+                torch.Tensor,
+                checkpoint.checkpoint(self._forward, x, c, cross_kv, mask, use_reentrant=False),
+            )
         return self._forward(x, c, cross_kv, mask)
 
 
@@ -317,6 +338,15 @@ class FullDuplexDiT(nn.Module):
         self.cross_proj = nn.Linear(hidden_dim * 2, hidden_dim)
         self.mode_embedding = nn.Embedding(2, hidden_dim)
 
+        # ── Input projection: noisy_params (num_params dims) → hidden_dim ──
+        # The diffusion model takes the noisy parameter sequence as input and
+        # must operate in the DiT's working dimension (hidden_dim). This
+        # projection lifts the 45-dim motion latent into the model's
+        # representation space. The output head mirrors it back down to
+        # num_params. (Fix for a latent shape bug discovered during smoke
+        # testing on RTX 4060 Ti on 2026-06-08.)
+        self.input_proj = nn.Linear(num_params, hidden_dim)
+
         # ── Timestep embedding ──
         self.time_embed = TimestepEmbedding(hidden_dim)
 
@@ -365,21 +395,17 @@ class FullDuplexDiT(nn.Module):
         logger.info(f"FullDuplexDiT warmed up on {device}")
 
     def to_half(self):
-        self.audio_encoder.to_half()
-        self.visual_encoder.to_half()
-        self.text_encoder.to_half()
-        for module in [
-            self.audio_proj,
-            self.cross_proj,
-            self.mode_embedding,
-            self.time_embed,
-            self.identity_embedding,
-            self.output_head,
-        ]:
-            module.half()
-        for block in self.dit_blocks:
-            block.half()
-        return self
+        """Convert the entire model to half precision.
+
+        Uses ``nn.Module.half()`` over the whole tree instead of a hand-maintained
+        list of submodules. The previous list omitted ``input_proj``, so after
+        conversion it stayed float32 while every DiT block became float16 and the
+        first fp16 forward pass raised "expected scalar type Half but found
+        Float". The encoder submodules are registered attributes, so recursing
+        covers them too - including ``text_encoder.proj``, which the encoder's own
+        ``to_half()`` skipped whenever its backbone had not loaded.
+        """
+        return self.half()
 
     def forward(
         self,
@@ -390,23 +416,87 @@ class FullDuplexDiT(nn.Module):
         identity_ids: torch.Tensor,
         timesteps: torch.Tensor,
         noisy_params: torch.Tensor,
+        listen_feat: torch.Tensor | None = None,
     ) -> torch.Tensor:
         B, T, P = noisy_params.shape
         device = noisy_params.device
 
         # ── Encode all modalities ──
-        listen_feat = self.audio_proj(self.audio_encoder(user_audio))
+        # ``listen_feat`` is an optional precomputed encoding of ``user_audio``.
+        # Inference must know the encoder's output length (T) before it can size
+        # the latent, and the encoder is the costly part of a step, so it encodes
+        # once and passes the result in. Without this the same waveform was encoded
+        # twice per step - a full Hubert pass per chunk that bought nothing.
+        if listen_feat is None:
+            listen_feat = self.audio_proj(self.audio_encoder(user_audio))
         speak_feat = self.audio_proj(self.audio_encoder(tts_audio))
         visual_feat = self.visual_encoder(visual_frames)
         text_feat = self.text_encoder(text_prompts, device).unsqueeze(1).expand(-1, T, -1)
         identity_feat = self.identity_embedding(identity_ids).unsqueeze(1).expand(-1, T, -1)
+
+        # Resample all per-frame conditioning features to a common temporal
+        # length T. Hubert produces 49 frames for 16 000 samples; the visual
+        # encoder produces 5; the diffusion latent is T. We use simple
+        # linear interpolation along the time axis to bring them all to T.
+        def _resample_time(x: torch.Tensor, T: int) -> torch.Tensor:
+            """Linearly interpolate ``x`` along the time axis to length ``T``.
+
+            Computed in float32 for numerical stability, then cast back to the
+            input dtype. The previous version built its ramps with float32
+            ``linspace`` and returned them directly, which silently promoted
+            half-precision conditioning to float32 - and since the 5-frame visual
+            features are always interpolated up to T, every fp16 forward pass
+            then failed at ``cross_proj`` with a dtype mismatch.
+            """
+            if x.shape[1] == T:
+                return x
+            # x: (B, t, D). Interpolate along t to T.
+            out_dtype = x.dtype
+            xf = x.float()
+            B_, t_, D_ = xf.shape
+            t_in = torch.linspace(0, 1, t_, device=x.device, dtype=torch.float32)
+            t_out = torch.linspace(0, 1, T, device=x.device, dtype=torch.float32)
+            idx = torch.searchsorted(t_in, t_out)
+            idx = idx.clamp(max=t_ - 1)
+            idx_prev = (idx - 1).clamp(min=0)
+            w = ((t_out - t_in[idx_prev]) / (t_in[idx] - t_in[idx_prev] + 1e-8)).unsqueeze(-1)
+            return ((1 - w) * xf[:, idx_prev, :] + w * xf[:, idx, :]).to(out_dtype)
+
+        assert listen_feat is not None
+        listen_feat = _resample_time(listen_feat, T)
+        speak_feat = _resample_time(speak_feat, T)
+        visual_feat = _resample_time(visual_feat, T)
+
+        # M1 fix: modality dropout. The training data does not carry real
+        # camera frames — they are zero-filled. Without dropout the model
+        # learns to depend on garbage visual features and cannot recover when
+        # real frames appear at inference. We randomly zero out the visual
+        # pathway 50% of the time during training so the model learns to
+        # produce motion from audio alone.
+        #
+        # We use bernoulli-based masking rather than `.item()` because
+        # `.item()` synchronizes the GPU and breaks the autograd graph.
+        if self.training:
+            keep = torch.bernoulli(torch.full((B, 1, 1), 0.5, device=device))  # 0 = drop, 1 = keep
+            visual_feat = visual_feat * keep
+
+        # Align the temporal axis of all conditioning features to T. The
+        # audio encoder (Hubert @50Hz over 1s of audio) produces T=49
+        # features; the visual encoder is fed 5 frames at fixed intervals.
+        # We repeat visual_feat to T by tiling its 5 frame features across
+        # the chunk. (A learned temporal pooling/interp would be better,
+        # but tile is the minimum that lets the model run.)
+        if visual_feat.shape[1] != T:
+            visual_feat = visual_feat.repeat(1, T // visual_feat.shape[1] + 1, 1)[:, :T, :]
 
         # ── Time + identity condition ──
         t_emb = self.time_embed(timesteps)
         c = t_emb + identity_feat.mean(dim=1) if identity_feat is not None else t_emb
 
         # ── Start from noisy params ──
-        x = noisy_params
+        # Lift from motion parameter space (num_params) into the DiT's
+        # working dimension (hidden_dim).
+        x = self.input_proj(noisy_params)
 
         # ── Interleaved DiT blocks ──
         listen_emb = self.mode_embedding(torch.tensor([0], device=device)).expand(B, T, -1)

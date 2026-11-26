@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 
 from src.motion.model import FullDuplexDiT
 from src.motion.training.dataset import MotionDataset
+from src.motion.training.ema import EMAModel
 from src.motion.training.lora import apply_lora, save_lora
 
 
@@ -27,6 +28,13 @@ def train(
     dataset_type: str = "preprocessed",
     val_split: float = 0.1,
     resume_from: str | None = None,
+    weight_decay: float = 0.01,
+    warmup_steps: int = 100,
+    early_stopping_patience: int = 0,
+    ema_decay: float = 0.0,
+    #: Render a model-motion GIF every N epochs into ``output_dir/samples``
+    #: (0 = off). Fixed noise/timestep, so GIFs show progress on the same clip.
+    sample_every: int = 0,
     # ── LoRA ──
     use_lora: bool = False,
     lora_rank: int = 8,
@@ -46,8 +54,11 @@ def train(
             device = "cpu"
     logger.info(f"Training Full-Duplex DiT on {device}")
 
-    # Precompute diffusion schedule (DDPM linear)
-    betas = torch.linspace(1e-4, 0.02, num_diffusion_steps)
+    # Precompute diffusion schedule (DDPM linear). The tensor is moved to
+    # the target device once, ahead of the training loop, so that
+    # gather/index operations work on the same device as the training
+    # batches. (Bug discovered on RTX 4060 Ti: 2026-06-08.)
+    betas = torch.linspace(1e-4, 0.02, num_diffusion_steps, device=device)
     alphas = 1.0 - betas
     _alphas_cumprod = torch.cumprod(alphas, dim=0)
 
@@ -59,13 +70,15 @@ def train(
     # Train/val split
     val_size = max(1, int(len(full_dataset) * val_split)) if val_split > 0 else 0
     train_size = len(full_dataset) - val_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        full_dataset, [train_size, val_size]
-    )
+    train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
     logger.info(f"Dataset: {train_size} train / {val_size} val samples")
 
     dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0) if val_size > 0 else None
+    val_loader = (
+        DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+        if val_size > 0
+        else None
+    )
     model = FullDuplexDiT(
         num_params=num_params,
         hidden_dim=hidden_dim,
@@ -75,15 +88,31 @@ def train(
 
     # Resume from checkpoint if provided
     start_epoch = 0
+    _resume_state = None
     if resume_from is not None:
         resume_path = Path(resume_from)
         if resume_path.exists():
-            state = torch.load(resume_path, map_location=device)
-            model.load_state_dict(state)
-            start_epoch = int(resume_path.stem.split("_")[-1]) + 1
-            logger.info(f"Resumed from {resume_path} (epoch {start_epoch})")
+            state = torch.load(resume_path, map_location=device, weights_only=False)
+            # L4 fix: support both legacy (raw state_dict) and new format
+            # (dict with model / optimizer / scheduler / epoch).
+            if isinstance(state, dict) and "model" in state:
+                model.load_state_dict(state["model"])
+                start_epoch = int(state.get("epoch", 0)) + 1
+                logger.info(f"Resumed full state from {resume_path} (epoch {start_epoch})")
+                # Optimizer and scheduler are restored after they are created.
+                _resume_state = state
+            else:
+                model.load_state_dict(state)
+                # Legacy: epoch derived from filename suffix.
+                try:
+                    start_epoch = int(resume_path.stem.split("_")[-1]) + 1
+                except ValueError:
+                    start_epoch = 0
+                logger.info(f"Resumed legacy weights from {resume_path} (epoch {start_epoch})")
+                _resume_state = None
         else:
             logger.warning(f"Resume checkpoint not found: {resume_path}")
+            _resume_state = None
 
     # ── LoRA application ──
     if use_lora:
@@ -113,13 +142,76 @@ def train(
         trainable_params = [p for p in model.parameters() if p.requires_grad]
     else:
         trainable_params = model.parameters()
-    optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
-    criterion = nn.MSELoss()
+    optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
+    # M4 fix: config specified warmup_steps but it was ignored. Build a
+    # sequential scheduler that linearly warms up over `warmup_steps`, then
+    # cosine-anneals over the remaining epochs.
+    steps_per_epoch = max(1, len(dataloader) // max(grad_accum_steps, 1))
+    total_steps = max(1, num_epochs * steps_per_epoch)
+    warmup_steps = min(warmup_steps, max(1, total_steps - 1))
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
+    )
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(1, total_steps - warmup_steps)
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
+    )
+
+    # C-3 fix: the AMP scaler must exist *before* the resume block below, which
+    # restores its state. It used to be constructed after that block, so any
+    # resume from a full snapshot raised UnboundLocalError on `scaler`.
     scaler = torch.amp.GradScaler(device) if use_amp and device == "cuda" else None
 
+    # L4 fix: restore optimizer / scheduler / scaler state if resuming from a
+    # full snapshot. Must run AFTER these objects are constructed.
+    if _resume_state is not None:
+        if "optimizer" in _resume_state:
+            try:
+                optimizer.load_state_dict(_resume_state["optimizer"])
+            except Exception as e:
+                logger.warning(f"Could not restore optimizer state: {e}")
+        if "scheduler" in _resume_state:
+            try:
+                scheduler.load_state_dict(_resume_state["scheduler"])
+            except Exception as e:
+                logger.warning(f"Could not restore scheduler state: {e}")
+        if scaler is not None and "scaler" in _resume_state:
+            try:
+                scaler.load_state_dict(_resume_state["scaler"])
+            except Exception as e:
+                logger.warning(f"Could not restore scaler state: {e}")
+
+    # L2 fix: optional EMA of trainable parameters. Disabled by default
+    # (ema_decay=0.0). Set to ~0.999 to enable.
+    ema: EMAModel | None = None
+    if ema_decay > 0.0:
+        ema = EMAModel(model, decay=ema_decay)
+        if _resume_state is not None and "ema" in _resume_state:
+            try:
+                ema.load_state_dict(_resume_state["ema"])
+                logger.info("Restored EMA state from checkpoint")
+            except Exception as e:
+                logger.warning(f"Could not restore EMA state: {e}")
+        logger.info(f"EMA enabled (decay={ema_decay})")
+    criterion = nn.MSELoss()
+
     model.train()
+    # L3 fix: track best validation loss for early stopping.
+    best_val_loss = float("inf")
+    patience_counter = 0
+    # The final save must return the best-validation weights, not whatever the
+    # loop happened to stop on: an early-stopped weekend run would otherwise be
+    # worse than the best epoch it flew past.
+    best_model_state: dict | None = None
+    best_ema_state: dict | None = None
+    # The resume cursor is "last completed epoch": start_epoch = stored + 1.
+    # Storing num_epochs here instead silently discards the remaining schedule
+    # when an early-stopped run is resumed.
+    last_completed_epoch = start_epoch - 1
     for epoch in range(start_epoch, num_epochs):
+        last_completed_epoch = epoch
         total_loss = 0.0
         optimizer.zero_grad()
         for batch_idx, batch in enumerate(dataloader):
@@ -127,8 +219,12 @@ def train(
             motion = batch["motion"].to(device)
             B = audio.shape[0]
             tts_audio = batch.get("tts_audio", torch.zeros_like(audio)).to(device)
-            visual = batch.get("visual_frames", torch.zeros(B, 5, 3, 224, 224, device=device)).to(device)
-            identity = batch.get("identity_id", torch.zeros(B, dtype=torch.long, device=device)).to(device)
+            visual = batch.get("visual_frames", torch.zeros(B, 5, 3, 224, 224, device=device)).to(
+                device
+            )
+            identity = batch.get("identity_id", torch.zeros(B, dtype=torch.long, device=device)).to(
+                device
+            )
             prompts = batch.get("text_prompt", [""] * B)
             if isinstance(prompts, list):
                 pass  # already a list
@@ -145,15 +241,22 @@ def train(
             noisy = sqrt_alpha_cumprod_t * motion + sqrt_one_minus_alpha_cumprod_t * noise
 
             with torch.amp.autocast(device_type=device, enabled=scaler is not None):
+                # X-prediction: model directly predicts the clean sample x_0
+                # Output is bounded to [0, 1] by Sigmoid — naturally compatible with
+                # Live2D parameter range. Inference must use x-prediction DDIM
+                # (see inference.py: _diffusion_infer).
                 pred = model(audio, tts_audio, visual, prompts, identity, t, noisy)
-                loss = criterion(pred, noise)
+                loss = criterion(pred, motion)
 
             if scaler is not None:
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
 
-            if (batch_idx + 1) % grad_accum_steps == 0:
+            # Step on every full group AND on the tail of the epoch: leftover
+            # batches would otherwise be zeroed by the next zero_grad() without
+            # ever stepping (M-19).
+            if (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(dataloader):
                 if scaler is not None:
                     scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -162,16 +265,24 @@ def train(
                     scaler.update()
                 else:
                     optimizer.step()
+                # M4 fix: scheduler is now per-step (SequentialLR over total
+                # optimization steps including warmup), so we must call
+                # step() after each optimizer step, not once per epoch.
+                scheduler.step()
+                # L2: refresh EMA shadow weights after each optimizer step.
+                if ema is not None:
+                    ema.update(model)
                 optimizer.zero_grad()
 
             total_loss += loss.item()
-
-        scheduler.step()
         avg_loss = total_loss / max(len(dataloader), 1)
 
         # Validation loss
         val_loss = 0.0
         if val_loader is not None:
+            # L2: when EMA is enabled, validation runs under EMA weights for a
+            # less noisy early-stopping signal and a closer proxy to inference.
+            backup = ema.copy_to(model, store_original=True) if ema is not None else None
             model.eval()
             with torch.no_grad():
                 for batch in val_loader:
@@ -179,23 +290,53 @@ def train(
                     audio = batch["user_audio"].to(device)
                     B = audio.shape[0]
                     tts_audio = batch.get("tts_audio", torch.zeros_like(audio)).to(device)
-                    visual = batch.get("visual_frames", torch.zeros(B, 5, 3, 224, 224, device=device)).to(device)
-                    identity = batch.get("identity_id", torch.zeros(B, dtype=torch.long, device=device)).to(device)
+                    visual = batch.get(
+                        "visual_frames", torch.zeros(B, 5, 3, 224, 224, device=device)
+                    ).to(device)
+                    identity = batch.get(
+                        "identity_id", torch.zeros(B, dtype=torch.long, device=device)
+                    ).to(device)
                     prompts = batch.get("text_prompt", [""] * B)
                     t = torch.randint(0, num_diffusion_steps, (B,), device=device)
                     noise = torch.randn_like(motion)
                     alpha_cumprod_t = _alphas_cumprod[t].unsqueeze(-1).unsqueeze(-1).to(device)
-                    noisy = torch.sqrt(alpha_cumprod_t) * motion + torch.sqrt(1.0 - alpha_cumprod_t) * noise
+                    noisy = (
+                        torch.sqrt(alpha_cumprod_t) * motion
+                        + torch.sqrt(1.0 - alpha_cumprod_t) * noise
+                    )
                     with torch.amp.autocast(device_type=device, enabled=scaler is not None):
                         pred = model(audio, tts_audio, visual, prompts, identity, t, noisy)
-                        val_loss += criterion(pred, noise).item()
+                        val_loss += criterion(pred, motion).item()
             val_loss /= max(len(val_loader), 1)
+            if backup is not None and ema is not None:
+                ema.restore(model, backup)
             model.train()
 
         log_msg = f"Epoch {epoch + 1}/{num_epochs} | Loss: {avg_loss:.6f} | LR: {scheduler.get_last_lr()[0]:.2e}"
         if val_loader is not None:
             log_msg += f" | Val: {val_loss:.6f}"
         logger.info(log_msg)
+
+        # L3: early stopping based on validation loss.
+        if val_loader is not None:
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+                best_model_state = {
+                    k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                }
+                if ema is not None:
+                    best_ema_state = {
+                        k: v.detach().cpu().clone() for k, v in ema.state_dict().items()
+                    }
+            elif early_stopping_patience > 0:
+                patience_counter += 1
+                if patience_counter >= early_stopping_patience:
+                    logger.info(
+                        f"Early stopping at epoch {epoch + 1}: "
+                        f"val loss did not improve for {early_stopping_patience} epochs"
+                    )
+                    break
 
         # Save checkpoint every N epochs
         if (epoch + 1) % 10 == 0:
@@ -205,19 +346,156 @@ def train(
                 logger.info(f"LoRA checkpoint saved: {lora_ckpt_path}")
             else:
                 checkpoint_path = output_dir / f"full_duplex_dit_epoch_{epoch + 1:04d}.pt"
-                torch.save(model.state_dict(), checkpoint_path)
+                # L4 fix: include optimizer / scheduler / scaler / epoch so the
+                # run can be fully resumed.
+                _save_full_checkpoint(
+                    checkpoint_path,
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    scaler=scaler,
+                    ema=ema,
+                    epoch=epoch,
+                    config={
+                        "num_params": num_params,
+                        "hidden_dim": hidden_dim,
+                        "num_layers": num_layers,
+                        "num_diffusion_steps": num_diffusion_steps,
+                        "weight_decay": weight_decay,
+                        "warmup_steps": warmup_steps,
+                        "ema_decay": ema_decay,
+                    },
+                )
                 logger.info(f"Checkpoint saved: {checkpoint_path}")
 
+        if sample_every > 0 and (epoch + 1) % sample_every == 0:
+            sample_loader = val_loader if val_loader is not None else dataloader
+            _write_epoch_sample(
+                model,
+                sample_loader,
+                device,
+                num_diffusion_steps,
+                _alphas_cumprod,
+                scaler,
+                output_dir / "samples" / f"epoch_{epoch + 1:04d}.gif",
+            )
+
     # Final save
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        if ema is not None and best_ema_state is not None:
+            ema.load_state_dict(best_ema_state)
+        logger.info(f"Restoring best-validation weights (val loss {best_val_loss:.6f})")
     if use_lora:
         final_lora_path = output_dir / "lora_adapter.pt"
         save_lora(model, final_lora_path)
         logger.info(f"LoRA adapter saved to {final_lora_path}")
     else:
+        # L2: final model uses EMA weights (better quality).
+        backup = ema.copy_to(model, store_original=True) if ema is not None else None
         checkpoint_path = output_dir / "full_duplex_dit.pt"
-        torch.save(model.state_dict(), checkpoint_path)
+        _save_full_checkpoint(
+            checkpoint_path,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            ema=ema,
+            epoch=last_completed_epoch,
+            config={
+                "num_params": num_params,
+                "hidden_dim": hidden_dim,
+                "num_layers": num_layers,
+                "num_diffusion_steps": num_diffusion_steps,
+                "weight_decay": weight_decay,
+                "warmup_steps": warmup_steps,
+                "ema_decay": ema_decay,
+            },
+        )
+        if backup is not None and ema is not None:
+            ema.restore(model, backup)
         logger.info(f"Model saved to {checkpoint_path}")
     return model
+
+
+def _save_full_checkpoint(
+    path: Path,
+    *,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Any,
+    scaler: torch.amp.GradScaler | None,
+    ema: EMAModel | None = None,
+    epoch: int,
+    config: dict,
+) -> None:
+    """Persist a complete training snapshot for resume.
+
+    Stores the model state, optimizer state (momentum, variance, step),
+    scheduler state, AMP scaler state, the EMA shadow weights, the epoch
+    counter, and the training config. Together these are sufficient to
+    exactly resume a run.
+    """
+    payload = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "epoch": epoch,
+        "config": config,
+    }
+    if scaler is not None:
+        payload["scaler"] = scaler.state_dict()
+    if ema is not None:
+        payload["ema"] = ema.state_dict()
+    torch.save(payload, path)
+
+
+def _write_epoch_sample(
+    model,
+    loader,
+    device: str,
+    num_diffusion_steps: int,
+    alphas_cumprod: torch.Tensor,
+    scaler,
+    out_path: Path,
+) -> None:
+    """Render one GIF of the model's predicted motion for a fixed clip.
+
+    The noise and timestep are fixed across epochs, so consecutive GIFs show
+    progress on the same corruption of the same clip ("has it learned
+    anything"). Best effort: sampling must never kill a long run.
+    """
+    try:
+        batch = next(iter(loader))
+        audio = batch["user_audio"].to(device)
+        motion = batch["motion"].to(device)
+        B = audio.shape[0]
+        tts_audio = batch.get("tts_audio", torch.zeros_like(audio)).to(device)
+        visual = batch.get("visual_frames", torch.zeros(B, 5, 3, 224, 224, device=device)).to(
+            device
+        )
+        identity = batch.get("identity_id", torch.zeros(B, dtype=torch.long, device=device)).to(
+            device
+        )
+        prompts = batch.get("text_prompt", [""] * B)
+        if not isinstance(prompts, list):
+            prompts = [""] * B
+
+        gen = torch.Generator().manual_seed(0)
+        t = torch.full((B,), num_diffusion_steps // 2, dtype=torch.long, device=device)
+        noise = torch.randn(motion.shape, generator=gen).to(device)
+        alpha_cumprod_t = alphas_cumprod[t].unsqueeze(-1).unsqueeze(-1).to(device)
+        noisy = torch.sqrt(alpha_cumprod_t) * motion + torch.sqrt(1.0 - alpha_cumprod_t) * noise
+
+        with torch.amp.autocast(device_type=device, enabled=scaler is not None):
+            pred = model(audio, tts_audio, visual, prompts, identity, t, noisy)
+        frames = pred[0].detach().float().clamp(0.0, 1.0).cpu().numpy()
+
+        from src.motion.training.visualize import motion_to_gif
+
+        motion_to_gif(frames, out_path, fps=25)
+    except Exception as e:
+        logger.warning(f"Epoch sample rendering failed (training continues): {e}")
 
 
 if __name__ == "__main__":
@@ -235,23 +513,60 @@ if __name__ == "__main__":
     parser.add_argument("--num_layers", type=int, default=4)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--no_amp", action="store_true")
-    parser.add_argument("--dataset_type", type=str, default="preprocessed",
-                        choices=["preprocessed", "mead", "biwi", "vocaset"],
-                        help="Dataset format type")
-    parser.add_argument("--val_split", type=float, default=0.1,
-                        help="Validation split ratio (0=no validation)")
-    parser.add_argument("--resume", type=str, default=None,
-                        help="Resume from checkpoint path")
-    parser.add_argument("--use_lora", action="store_true",
-                        help="Enable LoRA fine-tuning (freezes base model)")
-    parser.add_argument("--lora_rank", type=int, default=8,
-                        help="LoRA decomposition rank (default: 8)")
-    parser.add_argument("--lora_alpha", type=float, default=16.0,
-                        help="LoRA scaling factor (default: 16.0)")
-    parser.add_argument("--lora_dropout", type=float, default=0.0,
-                        help="LoRA dropout rate (default: 0.0)")
-    parser.add_argument("--lora_target_modules", type=str, nargs="*", default=None,
-                        help="Module name patterns for LoRA (e.g. dit_blocks output_head)")
+    parser.add_argument(
+        "--dataset_type",
+        type=str,
+        default="preprocessed",
+        choices=["preprocessed", "mead", "biwi", "vocaset"],
+        help="Dataset format type",
+    )
+    parser.add_argument(
+        "--val_split", type=float, default=0.1, help="Validation split ratio (0=no validation)"
+    )
+    parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint path")
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=0.01,
+        help="Weight decay (L2 regularization) for AdamW",
+    )
+    parser.add_argument(
+        "--warmup_steps",
+        type=int,
+        default=100,
+        help="Linear warmup steps before cosine decay (0=disable)",
+    )
+    parser.add_argument(
+        "--early_stopping_patience",
+        type=int,
+        default=0,
+        help="Stop if val loss does not improve for N epochs (0=disable)",
+    )
+    parser.add_argument(
+        "--ema_decay",
+        type=float,
+        default=0.0,
+        help="EMA decay for trainable parameters (0=disable, 0.999 typical)",
+    )
+    parser.add_argument(
+        "--use_lora", action="store_true", help="Enable LoRA fine-tuning (freezes base model)"
+    )
+    parser.add_argument(
+        "--lora_rank", type=int, default=8, help="LoRA decomposition rank (default: 8)"
+    )
+    parser.add_argument(
+        "--lora_alpha", type=float, default=16.0, help="LoRA scaling factor (default: 16.0)"
+    )
+    parser.add_argument(
+        "--lora_dropout", type=float, default=0.0, help="LoRA dropout rate (default: 0.0)"
+    )
+    parser.add_argument(
+        "--lora_target_modules",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Module name patterns for LoRA (e.g. dit_blocks output_head)",
+    )
     args = parser.parse_args()
 
     train(
@@ -269,6 +584,10 @@ if __name__ == "__main__":
         dataset_type=args.dataset_type,
         val_split=args.val_split,
         resume_from=args.resume,
+        weight_decay=args.weight_decay,
+        warmup_steps=args.warmup_steps,
+        early_stopping_patience=args.early_stopping_patience,
+        ema_decay=args.ema_decay,
         use_lora=args.use_lora,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_alpha,

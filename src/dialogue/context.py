@@ -53,7 +53,11 @@ class ConversationContext:
         summary_msg = {"role": "system", "content": self._summary}
         # Find existing summary message (system role with content starting "[早期对话摘要")
         insert_idx = 0
-        if self._messages and self._messages[0]["role"] == "system" and not self._messages[0]["content"].startswith("[早期对话摘要"):
+        if (
+            self._messages
+            and self._messages[0]["role"] == "system"
+            and not self._messages[0]["content"].startswith("[早期对话摘要")
+        ):
             insert_idx = 1
         # Check if a summary already exists at insert_idx
         if (

@@ -47,12 +47,25 @@ asr:
   model_dir: "models/whisper"
 
 dialogue:
-  # Model type: qwen2.5, llama, custom
-  model_type: "qwen2.5"
-  model_path: "models/dialogue"
-  model_size: "3B"
-  quantization: "int8"  # int4, int8, fp16
+  # Dialogue runs over HTTP (ADR 0005). Leave provider/api_base/model empty to
+  # disable the dialogue model entirely.
+  # provider: "openai" (OpenAI-compatible /chat/completions) or "ollama" (/api/chat)
+  provider: ""
+  # Examples: https://api.deepseek.com/v1   |   http://localhost:11434
+  api_base: ""
+  # Examples: deepseek-chat   |   qwen2.5:3b
+  model: ""
+  # Name of the environment variable holding the API key. Never put the key here.
+  api_key_env: "AMADEUS_API_KEY"
+  request_timeout_seconds: 60
   max_context_tokens: 4096
+  max_new_tokens: 512
+  temperature: 0.7
+  top_p: 0.9
+  # Sent as "repeat_penalty" on the ollama protocol only (not an OpenAI field).
+  repetition_penalty: 1.1
+  persona_name: "Amadeus"
+  persona_file: ""
   # System prompt / character persona
   persona: |
     你是 Amadeus，一个温柔、理性、有共情能力的 AI 助手。
@@ -85,6 +98,33 @@ motion:
   diffusion_beta_end: 0.02
   identity_vocab_size: 16
   use_fp16: true
+  # Silence state: idle motion when nothing is being listened to or performed.
+  # Without it the engine only steps while someone is talking.
+  silence_enabled: true
+  silence_idle_seconds: 0.5      # quiet time before idle motion starts
+  silence_interval_seconds: 1.0  # how often an idle step runs
+  silence_prompt:
+    enabled: true
+    update_interval_ms: 1000
+    min_interval_seconds: 2.0
+    context_chars: 120
+    micro_behaviors:
+      - "slightly tilt the head"
+      - "slowly blink"
+      - "shift gaze toward the user"
+      - "take a small breath"
+      - "relax the shoulders"
+  max_speech_lag_seconds: 1.5    # how far Speak state may fall behind playback
+  baseline:
+    enabled: true
+    fps: 50.0
+    mouth_open_gain: 3.0
+    blink_interval_seconds: [3.0, 6.0]
+    blink_duration_seconds: 0.12
+    breath_cycles_per_minute: 14.0
+    head_motion_amplitude: 0.15
+    expression_smoothing: 0.2
+    seed: null
 
 perception:
   camera_device: null
@@ -134,6 +174,10 @@ preprocess:
     min_tracking_confidence: 0.5
   arkit_mapping:
     config_path: "src/motion/preprocess/mappings/default.yaml"
+  body_skeleton:
+    enabled: false
+    model_path: "models/yolov8n-pose.pt"
+    confidence: 0.25
     num_live2d_params: 45
   pipeline:
     output_format: "npz"  # npz or hdf5

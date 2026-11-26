@@ -1,5 +1,6 @@
 import math
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -14,13 +15,20 @@ class CameraPerception:
         self.enable_gaze = bool(perception_cfg.get("enable_gaze_estimation", True))
         self.enable_expression = bool(perception_cfg.get("enable_expression_recognition", True))
         self.device_index = perception_cfg.get("camera_device")
+        # The model consumes 5 frames per inference step (~1 Hz) and discards the
+        # rest, so capturing at the device rate wastes CPU on cvtColor/resize and
+        # (once perception is wired) FaceMesh. Gate at the source. (S2.2)
+        self.frame_fps = float(perception_cfg.get("fps", 4.0))
 
         self._cap = None
         self._running = False
         self._thread: threading.Thread | None = None
         self._face_mesh = None
+        self._last_published_at: float | None = None
         self._callbacks: list[Callable[[np.ndarray], None]] = []
         self._perception_callbacks: list[Callable[[dict[str, Any]], None]] = []
+        self._perception_lock = threading.Lock()
+        self._latest_perception: dict[str, Any] | None = None
 
     def start(self):
         if self._running:
@@ -54,6 +62,8 @@ class CameraPerception:
         self.stop()
         self._callbacks.clear()
         self._perception_callbacks.clear()
+        with self._perception_lock:
+            self._latest_perception = None
         if self._face_mesh is not None:
             try:
                 self._face_mesh.close()
@@ -67,11 +77,17 @@ class CameraPerception:
     def on_perception(self, callback: Callable[[dict[str, Any]], None]):
         self._perception_callbacks.append(callback)
 
+    def latest_perception(self) -> dict[str, Any] | None:
+        """Return the last FaceMesh snapshot, or None before the first frame."""
+        with self._perception_lock:
+            return dict(self._latest_perception) if self._latest_perception is not None else None
+
     def _load_mediapipe(self):
         try:
             import mediapipe as mp
 
-            self._face_mesh = mp.solutions.face_mesh.FaceMesh(
+            face_mesh = getattr(mp.solutions, "face_mesh")
+            self._face_mesh = face_mesh.FaceMesh(
                 static_image_mode=False,
                 max_num_faces=1,
                 refine_landmarks=True,
@@ -82,13 +98,33 @@ class CameraPerception:
         except ImportError:
             logger.warning("mediapipe not installed")
 
+    def _rate_gate(self, now: float) -> bool:
+        """Return True at most ``frame_fps`` times per second.
+
+        Time-based rather than frame-count-based: the device rate is unknown and
+        variable, so skipping every Nth frame would not produce a stable rate.
+        """
+        if self.frame_fps <= 0:
+            return True
+        interval = 1.0 / self.frame_fps
+        if self._last_published_at is not None and (now - self._last_published_at) < interval:
+            return False
+        self._last_published_at = now
+        return True
+
     def _capture_loop(self):
         import cv2
 
         while self._running and self._cap is not None:
             ret, frame = self._cap.read()
             if not ret:
+                # A failing device returns immediately; without a pause this is a
+                # hot spin that pegs a core.
+                time.sleep(0.01)
                 continue
+            if not self._rate_gate(time.monotonic()):
+                continue
+
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             resized = cv2.resize(frame_rgb, (224, 224))
             normalized = resized.astype(np.float32) / 255.0
@@ -99,8 +135,10 @@ class CameraPerception:
                 except Exception as e:
                     logger.error(f"Frame callback error: {e}")
 
-            if self._perception_callbacks and self._face_mesh is not None:
+            if self._face_mesh is not None:
                 perception = self._process_face_mesh(frame_rgb)
+                with self._perception_lock:
+                    self._latest_perception = dict(perception)
                 for cb in self._perception_callbacks:
                     try:
                         cb(perception)
@@ -156,9 +194,7 @@ class CameraPerception:
             left_eye_gap = float(np.linalg.norm(landmarks[159][:2] - landmarks[145][:2]))
             # Right eye: upper 386, lower 374
             right_eye_gap = float(np.linalg.norm(landmarks[386][:2] - landmarks[374][:2]))
-            result["eye_openness_l"] = float(
-                np.clip(left_eye_gap / (face_height * 0.05), 0.0, 1.0)
-            )
+            result["eye_openness_l"] = float(np.clip(left_eye_gap / (face_height * 0.05), 0.0, 1.0))
             result["eye_openness_r"] = float(
                 np.clip(right_eye_gap / (face_height * 0.05), 0.0, 1.0)
             )
@@ -209,9 +245,13 @@ class CameraPerception:
             left_eye_width = float(np.linalg.norm(left_eye_outer[:2] - left_eye_inner[:2]))
             if left_eye_width > 1e-6:
                 # Position of iris along eye width (0 outer .. 1 inner)
-                rel = (left_iris[0] - left_eye_outer[0]) / (left_eye_inner[0] - left_eye_outer[0] + 1e-6)
+                rel = (left_iris[0] - left_eye_outer[0]) / (
+                    left_eye_inner[0] - left_eye_outer[0] + 1e-6
+                )
                 if rel < 0.35:
-                    result["gaze_direction"] = "right"  # mirrored: outer is screen-right for left eye
+                    result["gaze_direction"] = (
+                        "right"  # mirrored: outer is screen-right for left eye
+                    )
                 elif rel > 0.65:
                     result["gaze_direction"] = "left"
                 else:

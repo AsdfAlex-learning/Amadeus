@@ -2,32 +2,43 @@
 name = "amadeus"
 version = "0.1.0"
 description = "Amadeus - LPM-inspired real-time interactive AI companion with Live2D avatar"
-requires-python = "==3.11.5"
+requires-python = ">=3.11,<3.12"
 license = { text = "MIT" }
 authors = [
     { name = "Amadeus Team" },
 ]
 dependencies = [
     "PySide6>=6.6.0",
-    "live2d-py>=0.5.0",
     "numpy>=1.24.0",
     "PyAudio>=0.2.13",
-    "opencv-python>=4.8.0",
+    "opencv-contrib-python>=4.10.0",
     "mediapipe>=0.10.0",
-    "whisper-cpp-python>=0.1.0",
     "torch>=2.0.0",
-    "transformers>=4.36.0",
+    "transformers>=4.32.1,<4.33",
     "pyyaml>=6.0",
     "soundfile>=0.12.0",
     "loguru>=0.7.0",
+    # imported by the code but previously undeclared
+    "librosa>=0.10.0",     # audio resampling fallback
+    "matplotlib>=3.7.0",   # training visualisation
 ]
 
 [project.optional-dependencies]
+native = [
+    "live2d-py>=0.5.0",
+    "whisper-cpp-python>=0.1.0",
+]
+preprocess = [
+    "ultralytics>=8.0.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-qt>=4.2.0",
+    "pytest-cov>=7.0.0",
+    "pre-commit>=3.0.0",
     "black>=23.0.0",
-    "ruff>=0.1.0",
+    "ruff>=0.17.4",
+    "basedpyright>=1.40.2",
 ]
 
 [build-system]
@@ -61,3 +72,43 @@ skip-magic-trailing-comma = false
 [tool.black]
 line-length = 100
 target-version = ["py311"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+faulthandler_timeout = 120
+
+# basedpyright is a real CI gate on errors (`--level error`). The remaining
+# warnings are import-resolution / third-party stub noise; reportMissingImports
+# and reportPrivateImportUsage are intentionally warnings, not errors.
+[tool.basedpyright]
+include = ["src"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+# Annotation-coverage checks: disabled because they flag untyped code as such.
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownParameterType = false
+reportUnknownArgumentType = false
+reportUnknownLambdaType = false
+reportMissingTypeArgument = false
+reportMissingTypeStubs = false
+reportAny = false
+reportExplicitAny = false
+reportUnusedCallResult = false
+reportUnreachable = false
+# Optional backends (cosyvoice2, ChatTTS, fish-speech, pyttsx3, librosa) are
+# imported lazily behind try/except and are not all installed. Those are
+# warnings, not errors: their absence is a supported configuration.
+reportMissingImports = "warning"
+reportMissingModuleSource = "warning"
+# torch's bundled stubs omit several re-exports that work at runtime
+# (GradScaler, autocast). That is a stub inaccuracy, not a code defect.
+reportPrivateImportUsage = "warning"
+
+[tool.coverage.run]
+source = ["src"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

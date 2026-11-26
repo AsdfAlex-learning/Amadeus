@@ -20,6 +20,7 @@ def _validate_range(value: float, name: str, lo: float = 0.0, hi: float = 1.0) -
     """Clamp a numeric value to [lo, hi] with a warning if out of range."""
     if value < lo or value > hi:
         import warnings
+
         warnings.warn(f"{name}={value} out of [{lo}, {hi}], clamped")
         return max(lo, min(hi, value))
     return value
@@ -51,8 +52,14 @@ def get_performance_config(config: dict[str, Any] | None = None) -> dict[str, An
         config = load_config()
     perf = config.get("performance", {})
     # Clamp all performance params to [0.0, 1.0]
-    for key in ("gesture_scale", "react_speed", "expressiveness",
-                "mouth_open_max", "head_motion_range", "idle_energy"):
+    for key in (
+        "gesture_scale",
+        "react_speed",
+        "expressiveness",
+        "mouth_open_max",
+        "head_motion_range",
+        "idle_energy",
+    ):
         if key in perf:
             perf[key] = _validate_range(perf[key], f"performance.{key}", 0.0, 1.0)
     return perf

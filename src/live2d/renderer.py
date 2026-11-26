@@ -61,7 +61,7 @@ class Live2DRenderer:
     def set_parameter(self, name: str, value: float):
         clamped = max(0.0, min(1.0, float(value)))
         self._params[name] = clamped
-        if self._model_loaded:
+        if self._model_loaded and self._live2d is not None:
             try:
                 self._live2d.SetParameterValue(name, clamped)
             except Exception:
@@ -75,7 +75,7 @@ class Live2DRenderer:
         return self._params.get(name, 0.0)
 
     def render(self, width: int, height: int):
-        if not self._model_loaded:
+        if not self._model_loaded or self._live2d is None:
             return
         try:
             self._live2d.Update()
@@ -84,14 +84,14 @@ class Live2DRenderer:
             logger.debug(f"Render error: {e}")
 
     def resize(self, width: int, height: int):
-        if self._model_loaded:
+        if self._model_loaded and self._live2d is not None:
             try:
                 self._live2d.Resize(width, height)
             except Exception as e:
                 logger.debug(f"Resize error: {e}")
 
     def cleanup(self):
-        if self._model_loaded:
+        if self._model_loaded and self._live2d is not None:
             try:
                 self._live2d.Terminate()
             except Exception as e:

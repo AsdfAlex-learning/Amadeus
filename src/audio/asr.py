@@ -30,7 +30,7 @@ class WhisperASR:
             return False
 
     def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
-        if not self._loaded:
+        if not self._loaded or self._model is None:
             return ""
         result = self._model.transcribe(
             audio.astype(np.float32),

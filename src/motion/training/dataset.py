@@ -97,17 +97,32 @@ class MotionDataset(Dataset):
     def __len__(self) -> int:
         return len(self._samples)
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor | str]:
         sample = self._samples[idx]
         if sample["type"] == "npz":
             return self._get_npz_item(sample)
         return self._get_legacy_item(sample)
 
-    def _get_npz_item(self, sample: dict) -> dict[str, torch.Tensor]:
+    def _get_npz_item(self, sample: dict) -> dict[str, torch.Tensor | str]:
         data = np.load(str(sample["npz_path"]), allow_pickle=False)
         live2d_params = data["live2d_params"]  # (T, 45)
-        head_angles = data.get("head_angles", np.zeros((live2d_params.shape[0], 3), dtype=np.float32))
+        head_angles = data.get(
+            "head_angles", np.zeros((live2d_params.shape[0], 3), dtype=np.float32)
+        )
         identity_id = int(data.get("identity_id", 0))
+        # C2 fix: the preprocessing pipeline extracts frames at a configurable
+        # fps (default 25). The model, however, operates at 50Hz (aligned with
+        # Hubert's stride). Upsample motion/head_angles to 50Hz so audio and
+        # motion share the same temporal axis. Down-stream chunk math then
+        # operates on the upsampled arrays.
+        source_fps = float(data.get("fps", 25.0))
+        if source_fps != float(self.AUDIO_FEATURES_PER_SEC):
+            live2d_params = self._resample_motion(
+                live2d_params, source_fps, float(self.AUDIO_FEATURES_PER_SEC)
+            )
+            head_angles = self._resample_motion(
+                head_angles, source_fps, float(self.AUDIO_FEATURES_PER_SEC)
+            )
         audio = self._load_audio(sample["audio_path"])
 
         T_motion = live2d_params.shape[0]
@@ -116,15 +131,17 @@ class MotionDataset(Dataset):
 
         if max_chunks == 0:
             audio_chunk = np.zeros(self.chunk_samples, dtype=np.float32)
-            motion_chunk = np.zeros((self.chunk_motion_frames, self.num_live2d_params), dtype=np.float32)
+            motion_chunk = np.zeros(
+                (self.chunk_motion_frames, self.num_live2d_params), dtype=np.float32
+            )
             head_chunk = np.zeros((self.chunk_motion_frames, 3), dtype=np.float32)
         else:
             start_chunk = np.random.randint(0, max(1, max_chunks))
             audio_start = start_chunk * self.chunk_samples
             motion_start = start_chunk * self.chunk_motion_frames
-            audio_chunk = audio[audio_start:audio_start + self.chunk_samples]
-            motion_chunk = live2d_params[motion_start:motion_start + self.chunk_motion_frames]
-            head_chunk = head_angles[motion_start:motion_start + self.chunk_motion_frames]
+            audio_chunk = audio[audio_start : audio_start + self.chunk_samples]
+            motion_chunk = live2d_params[motion_start : motion_start + self.chunk_motion_frames]
+            head_chunk = head_angles[motion_start : motion_start + self.chunk_motion_frames]
 
         # Pad if needed
         if len(audio_chunk) < self.chunk_samples:
@@ -148,18 +165,51 @@ class MotionDataset(Dataset):
             "head_angles": torch.from_numpy(head_chunk).float(),
         }
 
-    def _get_legacy_item(self, sample: dict) -> dict[str, torch.Tensor]:
+    def _get_legacy_item(self, sample: dict) -> dict[str, torch.Tensor | str]:
         audio = self._load_audio(sample["audio_path"])
         motion = np.load(str(sample["motion_path"])).astype(np.float32)
-        min_len = min(len(audio), len(motion))
-        audio = audio[:min_len]
-        motion = motion[:min_len]
-        start = np.random.randint(0, max(1, min_len - self.chunk_samples))
-        audio_chunk = audio[start:start + self.chunk_samples]
-        motion_chunk = motion[start:start + self.chunk_samples]
+        # L5 fix: legacy .npy files store motion as (samples, 45) aligned
+        # sample-by-sample with the audio waveform. The previous code indexed
+        # the motion array with `chunk_samples` (16 000) frames, which is
+        # nonsense for motion that lives at 25–50 Hz. Resample motion to
+        # the model's 50 Hz rate first, then chunk normally.
+        #
+        # Sample-aligned means roughly one row per audio sample at
+        # `sample_rate`. The old guard only fired for motion *longer* than the
+        # audio (`>`), so the canonical equal-length layout was chunked raw:
+        # 16 000 audio samples paired with 50 motion rows.
+        if motion.ndim == 2 and motion.shape[0] * 2 > len(audio):
+            motion = self._resample_motion(
+                motion, src_fps=float(self.sample_rate), dst_fps=float(self.AUDIO_FEATURES_PER_SEC)
+            )
+        # Truncate in TIME units. `min(len(audio), len(motion))` compared
+        # sample_rate samples against 50 Hz rows and cut the audio to 1/320 of
+        # the clip whenever the resample had run, leaving max_chunks == 0 and
+        # an all-zero dummy sample.
+        max_motion_rows = int(len(audio) * self.AUDIO_FEATURES_PER_SEC / self.sample_rate)
+        motion = motion[:max_motion_rows]
+        max_audio_samples = int(len(motion) * self.sample_rate / self.AUDIO_FEATURES_PER_SEC)
+        audio = audio[:max_audio_samples]
+        T_audio_chunks = len(audio) // self.chunk_samples
+        T_motion_chunks = len(motion) // self.chunk_motion_frames
+        max_chunks = min(T_audio_chunks, T_motion_chunks)
+        if max_chunks == 0:
+            audio_chunk = np.zeros(self.chunk_samples, dtype=np.float32)
+            motion_chunk = np.zeros(
+                (self.chunk_motion_frames, self.num_live2d_params), dtype=np.float32
+            )
+        else:
+            start_chunk = np.random.randint(0, max(1, max_chunks))
+            audio_start = start_chunk * self.chunk_samples
+            motion_start = start_chunk * self.chunk_motion_frames
+            audio_chunk = audio[audio_start : audio_start + self.chunk_samples]
+            motion_chunk = motion[motion_start : motion_start + self.chunk_motion_frames]
+
         if len(audio_chunk) < self.chunk_samples:
             audio_chunk = np.pad(audio_chunk, (0, self.chunk_samples - len(audio_chunk)))
-            motion_chunk = np.pad(motion_chunk, ((0, self.chunk_samples - len(motion_chunk)), (0, 0)))
+        if len(motion_chunk) < self.chunk_motion_frames:
+            pad_len = self.chunk_motion_frames - len(motion_chunk)
+            motion_chunk = np.pad(motion_chunk, ((0, pad_len), (0, 0)))
 
         return {
             "user_audio": torch.from_numpy(audio_chunk).float(),
@@ -173,13 +223,33 @@ class MotionDataset(Dataset):
             "head_angles": torch.zeros(motion_chunk.shape[0], 3, dtype=torch.float32),
         }
 
+    @staticmethod
+    def _resample_motion(arr: np.ndarray, src_fps: float, dst_fps: float) -> np.ndarray:
+        """Linearly resample a (T, D) array from src_fps to dst_fps.
+
+        Used to align preprocessing-time fps (typically 25) with the model's
+        50Hz motion rate. Requires T ≥ 2 (single-frame inputs are returned as-is).
+        """
+        if arr.shape[0] < 2 or src_fps == dst_fps:
+            return arr
+        ratio = dst_fps / src_fps
+        new_len = max(1, int(round(arr.shape[0] * ratio)))
+        t_in = np.linspace(0.0, 1.0, num=arr.shape[0], dtype=np.float32)
+        t_out = np.linspace(0.0, 1.0, num=new_len, dtype=np.float32)
+        out = np.empty((new_len, arr.shape[1]), dtype=np.float32)
+        for d in range(arr.shape[1]):
+            out[:, d] = np.interp(t_out, t_in, arr[:, d].astype(np.float32))
+        return out
+
     def _load_audio(self, path: Path) -> np.ndarray:
         try:
             import soundfile as sf
+
             audio, sr = sf.read(str(path))
             if sr != self.sample_rate:
                 try:
                     import librosa
+
                     audio = librosa.resample(audio, orig_sr=sr, target_sr=self.sample_rate)
                 except ImportError:
                     logger.warning("librosa not installed, skipping resample")
@@ -196,6 +266,7 @@ class MotionDataset(Dataset):
         Use: python -m src.motion.preprocess.pipeline <video_dir> --output_dir <output_dir>
         """
         from src.motion.preprocess.pipeline import PreprocessPipeline
+
         pipeline = PreprocessPipeline()
         results = pipeline.process_directory(video_dir, output_dir)
         pipeline.cleanup()

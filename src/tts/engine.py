@@ -30,7 +30,7 @@ class TTSEngine:
         return loaded
 
     def synthesize(self, text: str) -> np.ndarray:
-        if not self._loaded:
+        if not self._loaded or self._model is None:
             return self._silence(0.5)
         try:
             return self._model(text)
@@ -116,9 +116,40 @@ class TTSEngine:
             logger.debug("pyttsx3 not installed")
             return False
 
-    @staticmethod
-    def _silence(duration: float) -> np.ndarray:
-        return np.zeros(int(duration * 16000), dtype=np.float32)
+    def cleanup(self) -> None:
+        """Release the backend.
+
+        No caller did this before — `closeEvent` never touched the TTS engine — so a
+        backend holding loaded models was simply abandoned at shutdown. Backends
+        that need more than dropping a reference (a speech driver thread, a decoder
+        process) should expose a `close()` from their loader and have it called here.
+        """
+        model = self._model
+        self._model = None
+        self._fallback = None
+        self._loaded = False
+        closer = getattr(model, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception as e:
+                logger.debug(f"TTS backend close failed: {e}")
+
+    def _silence(self, duration: float) -> np.ndarray:
+        """Silence at *this engine's* advertised rate.
+
+        Hardcoding 16000 while advertising ``sample_rate`` (22050) made the
+        fallback the wrong duration as soon as anything downstream trusted the
+        declared rate. (C-5)
+        """
+        return np.zeros(int(duration * self.sample_rate), dtype=np.float32)
+        """Silence at *this engine's* advertised rate.
+
+        Hardcoding 16000 while advertising ``sample_rate`` (22050) made the
+        fallback the wrong duration as soon as anything downstream trusted the
+        declared rate. (C-5)
+        """
+        return np.zeros(int(duration * self.sample_rate), dtype=np.float32)
 
     @property
     def is_loaded(self) -> bool:
