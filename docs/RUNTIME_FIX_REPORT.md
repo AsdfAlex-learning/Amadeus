@@ -3,8 +3,9 @@
 > **分支**: `fix/runtime-p0`（基于 `fix/training-pipeline-issues` @ `7070c9c`）
 > **提交数**: 23
 > **测试**: 151 passing（hermetic，约 20 秒）
-> **状态**: 未推送；4 份设计文档未提交
+> **状态**: 已合并进 main（PR #1，2026-11-26，merge commit `db04bae`）；文档已随 PR 入库
 > **更新（2026-10-12）**: C-7 已改道解决（见 §6）；分支现有 29 个提交、186 个测试。
+> **更新（2026-11-26）**: PR #1 合并（75 commits，234 tests）。评审修复落库：M-5/M-8/M-20（`5254805`）、M-9（`d71cdfa`）、M-19（`0c37efb`）；SilencePromptGenerator 已接线（`5aac7c4`）；basedpyright 归零并成为硬门禁。已知未处理（有意保留待定夺）：训练 loss 未按 `grad_accum_steps` 缩放（累积组有效步长偏大）；`head_motion_range` 围绕 0 缩放而映射 YAML 的角度以 0.5 为中性。
 > **日期**: 2026-09-15
 
 ---
@@ -208,7 +209,7 @@ C-7 是"假流式"：`DialogueModel.generate()` 把整段生成跑完后才 `yie
 
 - **`docs/MODEL_TRAINING_ROADMAP.md` 的 Phase 0（非神经基线）** —— RMS 驱动口型 + 眨眼 + 呼吸的规则实现。它让应用在没有神经模型时也能"活着"，并提供一个质量下限来判断神经模型是否真的更好。
 - 一次真实设备冒烟运行（麦克风 + 摄像头 + 一个 Live2D 模型 + Ollama）。
-- **`SilencePromptGenerator` 仍未实现**：`set_silence_prompt()` 只有定义和测试调用，生产代码无调用方；Silence 状态仍回退到对话提示词。`Silence` 的运动驱动力已在 `664b8b1` 修复，但"静默时该想什么"的提示词生成器仍是缺口。
+- **`SilencePromptGenerator`**：✅ 已接线（`5aac7c4`）：窗口以定时器生成静默提示词并经 `set_silence_prompt()` 下发，"静默时该想什么"的缺口已闭合。
 
 ### 7.2 其余已知未修项
 
@@ -216,7 +217,7 @@ C-7 是"假流式"：`DialogueModel.generate()` 把整段生成跑完后才 `yie
 |---|---|
 | `Silence` 状态无驱动力 | ✅ 已修（`664b8b1`）：运动 worker 改为定时 tick，空闲窗口后以**零输入 + `silence` 模式**出步，使引擎真正 always-on；可用 `silence_enabled` 关闭、`silence_interval_seconds` 限速 |
 | `_prev_params` 死状态 / overlap 是 no-op | ✅ 已移除（`7d19047`）：原 overlap 是"从队首弹出若干个、再按原序放回"的 no-op，既没跨 chunk 携带音频也没让缓冲变短，却暗示了并不存在的连续性。现场留下 NOTE 说明为何**没有**连续性机制，避免后人把 no-op 重新加回 |
-| `basedpyright` 无配置 | ✅ 已配置（`485304c`）：未配置时 **203 errors / 2384 warnings**（几乎全是注解覆盖类噪音）；配置后 **31 errors / 55 warnings**（2026-11-10 实测；14 个 optional-access、5 个 `video_reader.py` generator 返回类型、2 个 `dataset.py` dict 返回类型、2 个 `SequentialLR` 参数，其余为 torch stub / model optionality）。CI 步骤改为 `continue-on-error`；清零后移除该标记 |
+| `basedpyright` 无配置 | ✅ 已配置（`485304c`）：未配置时 **203 errors / 2384 warnings**（几乎全是注解覆盖类噪音）；配置后 **31 errors / 55 warnings**（2026-11-10 实测；14 个 optional-access、5 个 `video_reader.py` generator 返回类型、2 个 `dataset.py` dict 返回类型、2 个 `SequentialLR` 参数，其余为 torch stub / model optionality）。CI 步骤已于 2026-11-26 归零（0 errors）并从 `continue-on-error` 转为硬门禁 |
 | CI 未覆盖工作分支 | ✅ 已修（`7d19047`）：改为 `on: push / pull_request` 覆盖所有分支，并新增执行 `pytest` 的 `test` job |
 | README Phase 8 漂移 | ✅ 已修（`7d19047`）：改为如实描述（HDTF 是人类视频而非角色，仅作管线冒烟测试），并新增"运行加固"一节记录测试套件与"未在真实硬件验证"的边界 |
 | `SilencePromptGenerator` | ⏳ **未实现**：`set_silence_prompt()` 只有定义和测试调用，生产代码无调用方；生成器本身（结合感知 + 静默时长 + 情绪延续）仍未建 |
@@ -352,7 +353,7 @@ tests/test_window_shutdown.py            关闭顺序 + 幂等
 tests/test_shutdown_and_degradation.py   TTS 清理 + T1 断路器 + T7 降级
 ```
 
-### 8.4 未提交的文档（按你的选择保留在工作区）
+### 8.4 文档（2026-11-26 起已随 PR #1 入库；下文保留当时记录）
 
 ```
 docs/PROJECT_REVIEW_REPORT.md                              复盘审查报告
